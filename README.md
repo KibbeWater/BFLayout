@@ -603,4 +603,6 @@ Details worth knowing, gathered from the Switch Toolbox source:
   word, so the variable-length data after it can only be read once decoded.
 - Archives may ship with **no name table**, addressed only by hash. Those
   entries are listed by hash and can be read but not replaced until a name is
-  recovered (`archive.recoverNames`, fed from layout texture lists).
+  recovered (`archive.recoverNames`, implemented and self-tested, but with no button in the archive browser yet — the names
+have to come from somewhere, and the layout texture lists that would feed it are not
+wired up).

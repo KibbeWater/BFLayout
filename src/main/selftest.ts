@@ -1498,12 +1498,15 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
    * reading the rendered pixels back gives hardware ground truth.
    */
   /*
-   * Behind its own flag, because the decoder does not pass yet.
+   * Behind its own flag because it needs a dump, not because it fails. It passes: byte-exact
+   * across 1,097,728 samples from six textures and 17,152 blocks, covering seven of the eight
+   * modes (mode 7 does not appear in this game's art).
    *
-   * The harness is the finished part and the valuable part: it proved the decoder wrong
-   * — 25% of bytes matching, worst delta 249 — which is exactly the outcome that
-   * "plausible but unverified" hides. Leaving it in the default run would make the suite
-   * permanently red and stop it catching real regressions, so it runs on request:
+   * It earned its keep on the first run, which reported 25% matching with a worst delta of
+   * 249. That turned out to be the *harness*: readPixels returns rows bottom-up and the
+   * shader was also flipping v, so every comparison was against the wrong row. Real pixels
+   * from the wrong place, which is exactly what a broken decoder looks like — and why a
+   * cross-check against independent ground truth was worth building at all.
    *
    *     BFLAYOUT_SELFTEST_BC7=1 BFLAYOUT_SELFTEST_ROMFS=<dump> ... pnpm dev
    */
@@ -1846,6 +1849,21 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       await new Promise(r => setTimeout(r, 150))
     }
 
+    /*
+     * A pane is selected explicitly first.
+     *
+     * Right-clicking the middle of the canvas used to be relied on to hit something, which
+     * held for the synthetic fixture and not for a real layout whose art is elsewhere — and
+     * the menu renders its five items either way, so the check passed with nothing selected
+     * while Duplicate sat disabled and did nothing. What is under test here is the menu, not
+     * hit-testing; hit-testing has its own checks.
+     */
+    const live = dev.documents.getState()
+    const target = live.tabs.find(t => t.documentId === live.activeId).document.rootPane.children[0]
+    if (!target) return { error: 'the active layout has no child pane to duplicate' }
+    live.select([target.id])
+    await new Promise(r => setTimeout(r, 200))
+
     // Then the Windows ordering: released first, contextmenu after.
     fire('pointerdown', cx, cy, 2)
     fire('pointerup', cx, cy, 2)
@@ -1859,10 +1877,12 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       : []
 
     // Duplicating through the menu must actually add a pane.
-    const before = (() => {
-      const count = (p) => 1 + p.children.reduce((n, k) => n + count(k), 0)
-      return count(tab.document.rootPane)
-    })()
+    const current = () => {
+      const state = dev.documents.getState()
+      return state.tabs.find(t => t.documentId === state.activeId)
+    }
+    const count = (p) => 1 + p.children.reduce((n, k) => n + count(k), 0)
+    const before = count(current().document.rootPane)
     const dup = opened
       ? [...menu().querySelectorAll('[role="menuitem"]')]
           .find(b => b.textContent.includes('Duplicate'))
@@ -1875,6 +1895,8 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
      * item first — and used to close the menu before the button could ever be clicked,
      * making every item a no-op. Synthesising only the click hid that completely.
      */
+    // Disabled means nothing is selected, which would make the counts below meaningless.
+    const enabled = dup ? !dup.disabled : false
     if (dup) {
       const rect = dup.getBoundingClientRect()
       const at = { clientX: rect.left + 4, clientY: rect.top + 4, bubbles: true, cancelable: true }
@@ -1887,9 +1909,7 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     }
     await new Promise(r => setTimeout(r, 350))
 
-    const now = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
-    const count = (p) => 1 + p.children.reduce((n, k) => n + count(k), 0)
-    const after = count(now.document.rootPane)
+    const after = count(current().document.rootPane)
     const closed = !menu()
 
     // Leave the tree as it was.
@@ -1899,7 +1919,7 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     return {
       afterDrag, opened, openedOnPress, openedAfterPressOrdering,
       survived: window.__bfSelftestMenuSurvived,
-      items: labels.length, before, after, closed
+      enabled, items: labels.length, before, after, closed
     }
   })()`)) as {
     error?: string
@@ -1908,6 +1928,7 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     openedOnPress?: boolean
     openedAfterPressOrdering?: boolean
     survived?: boolean
+    enabled?: boolean
     items?: number
     before?: number
     after?: number
@@ -1930,6 +1951,9 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       contextMenu.opened === true && (contextMenu.items ?? 0) >= 5,
       `a right click opened the menu with ${contextMenu.items} items`
     )
+    // The items render whether or not anything is selected, so this is what says the
+    // menu is actually actionable.
+    check(contextMenu.enabled === true, 'Duplicate is enabled with a pane selected')
     check(
       (contextMenu.after ?? 0) > (contextMenu.before ?? 0),
       `Duplicate from the menu added a pane (${contextMenu.before} -> ${contextMenu.after})`
