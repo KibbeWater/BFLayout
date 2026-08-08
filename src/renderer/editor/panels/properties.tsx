@@ -744,16 +744,45 @@ function NumberField({
   step?: number
   onChange: (value: number) => void
 }): ReactNode {
+  /**
+   * The text being typed, or null when the field is showing the model's value.
+   *
+   * Committing on every keystroke made these fields fight the user: typing "100"
+   * into Width applied 1, then 10, then 100 — three undo entries and two frames at
+   * the wrong size — clearing the field sent `Number('') === 0` and collapsed the
+   * pane, and a leading "-" parsed as NaN so negatives could not be typed at all.
+   * The value is committed on blur and on Enter instead.
+   */
+  const [draft, setDraft] = useState<string | null>(null)
+
+  const commit = (text: string): void => {
+    setDraft(null)
+    // An empty or unparseable field reverts rather than writing a zero.
+    const parsed = Number(text)
+    if (text.trim() !== '' && Number.isFinite(parsed) && parsed !== value) onChange(parsed)
+  }
+
   return (
     <label className="min-w-0 flex-1">
       <span className="mb-0.5 block truncate text-[11px] text-muted-foreground">{label}</span>
       <input
         type="number"
-        value={Number.isFinite(value) ? value : 0}
+        value={draft ?? (Number.isFinite(value) ? value : 0)}
         step={step}
-        onChange={(event) => {
-          const parsed = Number(event.target.value)
-          if (Number.isFinite(parsed)) onChange(parsed)
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={(event) => commit(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            commit(event.currentTarget.value)
+            return
+          }
+          // Escape abandons the edit and puts the model's value back.
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            setDraft(null)
+            event.currentTarget.blur()
+          }
         }}
         className="w-full rounded border bg-input/40 px-1.5 py-0.5 tabular-nums"
       />

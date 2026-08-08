@@ -580,22 +580,35 @@ export function LayoutCanvas(): ReactNode {
 
     /**
      * Alignment guides run *after* grid snapping and can override it, because
-     * lining up with an existing pane is almost always what was intended when
-     * both are within reach. The threshold is divided by the zoom so the pull
-     * feels the same however far in you are.
+     * lining up with an existing pane is almost always what was intended when both
+     * are within reach. The threshold is divided by the zoom so the pull feels the
+     * same however far in you are.
+     *
+     * Two corrections from how this started:
+     *
+     *   - The guide offset is measured from the *snapped* rectangle. Measuring the
+     *     unsnapped one and then adding the result on top of a snapped position
+     *     landed the pane short of the line it had just drawn, by whatever the grid
+     *     had moved it — so the guide claimed an alignment that never happened.
+     *   - Guides no longer require grid snap to be on. They are the more precise of
+     *     the two tools, and gating them behind the coarser one was backwards. Alt
+     *     still suppresses both.
      */
     let guideDx = 0
     let guideDy = 0
     let shown: readonly Guide[] = []
     const renderer = rendererRef.current
-    if (snapping && renderer && drag.paneIds.length === 1) {
-      const entry = renderer.flattened.find(
-        (candidate) => candidate.pane.id === drag.paneIds[0]
-      )
+    const firstId = drag.paneIds[0]
+    const firstOrigin = firstId === undefined ? undefined : drag.origins.get(firstId)
+    if (!event.altKey && renderer && drag.paneIds.length === 1 && firstOrigin) {
+      const entry = renderer.flattened.find((candidate) => candidate.pane.id === firstId)
       if (entry) {
+        // What the grid actually moved the pane by, which is what the bounds move by.
+        const snappedDx = place(firstOrigin[0] + dx) - firstOrigin[0]
+        const snappedDy = place(firstOrigin[1] + dy) - firstOrigin[1]
         const [l, b, r, t] = worldBounds(entry)
         const result = alignmentSnap(
-          [l + dx, b + dy, r + dx, t + dy],
+          [l + snappedDx, b + snappedDy, r + snappedDx, t + snappedDy],
           alignmentCandidates(renderer.flattened, drag.paneIds),
           GUIDE_THRESHOLD_PIXELS / cameraRef.current.zoom
         )

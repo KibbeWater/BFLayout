@@ -942,9 +942,16 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
    * close handler is synchronous and cannot ask at the last moment. Before this
    * existed, Cmd+W discarded every unsaved layout without a word.
    */
-  // Relative to whatever is already open: earlier checks leave tabs behind, and
-  // with a romfs pointed at there is more than one.
+  // Start from a clean slate: earlier checks leave edited tabs behind, and with a
+  // romfs pointed at there is more than one, so a bare "count went up" is unstable.
+  await win.webContents.executeJavaScript(`(async () => {
+    const store = window.__bfdev.documents.getState()
+    for (const tab of store.tabs) store.markSaved(tab.documentId)
+    await new Promise(r => setTimeout(r, 300))
+  })()`)
   const unsavedBefore = getUnsavedCount()
+  check(unsavedBefore === 0, `every tab starts clean (${unsavedBefore} unsaved)`)
+
   await win.webContents.executeJavaScript(`(async () => {
     // mutate's recipe receives the tab, not the document.
     window.__bfdev.documents.getState().mutate((tab) => {
