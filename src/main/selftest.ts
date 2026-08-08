@@ -867,6 +867,91 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   check(sessions.keyed === true, 'every session behind a live tab carries a durable key')
 
   /*
+   * Input that used to be misrouted or dropped. Neither of these is visible in the pixels,
+   * and each was reachable in the first few minutes of real use.
+   */
+  const routingSetup = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    // An edit worth undoing, then the caret placed in a text field.
+    const pane = tab.document.rootPane.children[0]
+    store.select([pane.id])
+    await new Promise(r => setTimeout(r, 200))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    await new Promise(r => setTimeout(r, 250))
+
+    const field = document.querySelector('input[type=text], input:not([type]), textarea')
+    if (field) field.focus()
+    await new Promise(r => setTimeout(r, 120))
+
+    const live = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+    return { hadField: !!field, depth: live.history.undo.length }
+  })()`)) as { error?: string; hadField?: boolean; depth?: number }
+
+  if (routingSetup.error) {
+    check(false, `input routing: ${routingSetup.error}`)
+  } else if (!routingSetup.hadField) {
+    out.push('SKIP Cmd+Z focus guard (no text field on screen)')
+  } else {
+    /*
+     * The real IPC channel, not a stub. A native accelerator carries no target, so the
+     * focused element is the only thing that says whether Cmd+Z belongs to the field the
+     * user is typing in or to the document — and it used to go to the document, reverting
+     * the last canvas edit instead of the typing.
+     */
+    win.webContents.send('menu-command', 'undo')
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    const guarded = (await win.webContents.executeJavaScript(`(() => {
+      const dev = window.__bfdev
+      const state = dev.documents.getState()
+      const live = state.tabs.find(t => t.documentId === state.activeId)
+      document.activeElement && document.activeElement.blur && document.activeElement.blur()
+      return live.history.undo.length
+    })()`)) as number
+
+    check(
+      guarded === routingSetup.depth,
+      `Cmd+Z while typing left the document alone (undo depth ${guarded})`
+    )
+
+    // And with focus back on the canvas it must actually undo, exactly once.
+    win.webContents.send('menu-command', 'undo')
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    const undone = (await win.webContents.executeJavaScript(`(() => {
+      const state = window.__bfdev.documents.getState()
+      return state.tabs.find(t => t.documentId === state.activeId).history.undo.length
+    })()`)) as number
+    check(
+      undone === (routingSetup.depth ?? 0) - 1,
+      `Cmd+Z on the canvas undid exactly one entry (${routingSetup.depth} -> ${undone})`
+    )
+  }
+
+  // Grid and snap have to survive a restart, which means living in settings rather than in
+  // component state. Both fields existed and neither was read: the grid never stuck and
+  // snapping was off every launch regardless of the persisted default.
+  const viewSettings = (await win.webContents.executeJavaScript(`(async () => {
+    const c = window.__bfclient
+    const before = await c.app.settings.get()
+    await c.app.settings.patch({ showGrid: !before.showGrid, snapToGuides: !before.snapToGuides })
+    const after = await c.app.settings.get()
+    await c.app.settings.patch({ showGrid: before.showGrid, snapToGuides: before.snapToGuides })
+    return {
+      gridPersists: after.showGrid === !before.showGrid,
+      snapPersists: after.snapToGuides === !before.snapToGuides
+    }
+  })()`)) as { gridPersists?: boolean; snapPersists?: boolean }
+
+  check(
+    viewSettings.gridPersists === true && viewSettings.snapPersists === true,
+    'grid and snap live in settings, so they survive a restart'
+  )
+
+  /*
    * Text panes drawn in the game's own typeface.
    *
    * Needs a real dump, because the whole point is a lookup *across* it: this game ships no

@@ -317,6 +317,26 @@ Add `BFLAYOUT_SELFTEST_SHOT=/tmp/shot.png` to also capture the window, which is
 the only way to check what the GL canvas actually drew: the context runs without
 `preserveDrawingBuffer`, so `toDataURL` and `readPixels` both come back blank.
 
+### Where a keystroke goes
+
+Three things that all looked fine and were not:
+
+- **`Cmd+Z` while typing** used to undo the last *canvas* edit instead of the typing. The
+  canvas key handler has always declined when focus is in a field, but the native menu
+  forwards `Cmd+Z` as a command with no target at all, so it went straight to the document.
+  Both now ask the same question (`lib/typing-target.ts`), and the browser's own undo takes
+  the field — the same reasoning the Edit menu already used in giving cut/copy/paste native
+  roles. The end-to-end pass sends the real IPC and asserts both halves: nothing happens
+  with the caret in a field, and exactly one entry is undone with focus on the canvas, which
+  also rules out the accelerator and the keydown both firing.
+- **`Cmd+O` did nothing on the welcome screen** — the one screen whose entire purpose is
+  opening a file. The handler lived on the editor route, which is not mounted there. Open
+  and open-folder now sit in the always-mounted shell beside `save-all`, which had already
+  been moved for exactly this reason.
+- **Grid and snap did not persist.** Both are settings fields and neither was read: the grid
+  was component state so turning it off never stuck, and snapping was `useState(false)`
+  while the persisted default is `true`, so it was off every launch no matter what.
+
 ### Losing work
 
 Three separate things have to be true for edits to survive, and each is handled

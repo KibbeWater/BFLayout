@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
   Crosshair,
@@ -33,6 +33,7 @@ import {
   type ResizeHandle
 } from '@shared/formats/bflyt/editing'
 import { getOrpc } from '@renderer/lib/orpc'
+import { isTypingTarget } from '@renderer/lib/typing-target'
 import {
   markPaneDirty,
   paneById,
@@ -185,9 +186,7 @@ export function LayoutCanvas(): ReactNode {
   } | null>(null)
 
   const [glError, setGlError] = useState<string | null>(null)
-  const [showGrid, setShowGrid] = useState(true)
   const [showTextures, setShowTextures] = useState(true)
-  const [snap, setSnap] = useState(false)
   const [cursor, setCursor] = useState<[number, number]>([0, 0])
   /** Bumped when a texture finishes loading, purely to force a redraw. */
   const [textureRevision, setTextureRevision] = useState(0)
@@ -424,17 +423,10 @@ export function LayoutCanvas(): ReactNode {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null
-      /*
-       * Keep out of anything the user is typing into. `isContentEditable` matters
-       * as much as the tag list: a contenteditable would otherwise swallow its own
-       * arrow keys and Backspace into pane nudges and deletions.
-       */
-      if (
-        target &&
-        (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable)
-      ) {
-        return
-      }
+      // Keep out of anything the user is typing into: arrow keys would become pane
+      // nudges and Backspace a deletion while someone edits a name. Shared with the
+      // native menu commands, which have to answer the same question.
+      if (isTypingTarget(target)) return
 
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault()
@@ -503,7 +495,7 @@ export function LayoutCanvas(): ReactNode {
     const onCommand = (event: Event): void => {
       switch ((event as CustomEvent<string>).detail) {
         case 'toggle-grid':
-          setShowGrid((value) => !value)
+          setShowGrid(!showGrid)
           break
         case 'toggle-textures':
           setShowTextures((value) => !value)
@@ -520,7 +512,13 @@ export function LayoutCanvas(): ReactNode {
   }, [])
 
   const orpc = getOrpc()
+  const queryClient = useQueryClient()
   const settings = useQuery(orpc.app.settings.get.queryOptions())
+  const patchSettings = useMutation(
+    orpc.app.settings.patch.mutationOptions({
+      onSuccess: () => queryClient.invalidateQueries({ queryKey: orpc.app.settings.get.key() })
+    })
+  )
 
   /**
    * Layouts for the prt1 part panes in this document. Fetched in one batch and
@@ -552,6 +550,23 @@ export function LayoutCanvas(): ReactNode {
   }, [partQuery.data])
   const gridSize = settings.data?.gridSize ?? 32
   const showInvisible = settings.data?.showInvisiblePanes ?? true
+
+  /*
+   * Grid and snap come from settings, not from component state.
+   *
+   * Both fields existed in the schema and neither was read: the grid was `useState(true)`
+   * so turning it off never stuck, and snapping was `useState(false)` while the persisted
+   * default is `true` — so it was off every launch no matter what anyone set. The defaults
+   * here match the schema so the first frame agrees with what loads a moment later.
+   */
+  const showGrid = settings.data?.showGrid ?? true
+  const snap = settings.data?.snapToGuides ?? true
+  const setShowGrid = (next: boolean): void => {
+    patchSettings.mutate({ showGrid: next })
+  }
+  const setSnap = (next: boolean): void => {
+    patchSettings.mutate({ snapToGuides: next })
+  }
 
   /**
    * One renderer per canvas element, created by a ref callback rather than an
@@ -1183,7 +1198,7 @@ export function LayoutCanvas(): ReactNode {
       <div className="flex shrink-0 items-center gap-2 border-b px-2 py-1">
         <button
           type="button"
-          onClick={() => setShowGrid((value) => !value)}
+          onClick={() => setShowGrid(!showGrid)}
           className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-accent ${
             showGrid ? 'text-foreground' : 'text-muted-foreground/60'
           }`}
@@ -1205,7 +1220,7 @@ export function LayoutCanvas(): ReactNode {
         </button>
         <button
           type="button"
-          onClick={() => setSnap((value) => !value)}
+          onClick={() => setSnap(!snap)}
           className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-accent ${
             snap ? 'text-foreground' : 'text-muted-foreground/60'
           }`}

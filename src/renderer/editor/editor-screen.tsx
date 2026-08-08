@@ -26,6 +26,7 @@ const NO_DRAG = { WebkitAppRegion: 'no-drag' } as CSSProperties
 
 import { useOpenFile } from '@renderer/lib/use-open-file'
 import { useSave } from '@renderer/lib/use-save'
+import { isTypingFocused } from '@renderer/lib/typing-target'
 import { useUnsavedGuard } from '@renderer/lib/use-unsaved-guard'
 import { useSessionSnapshot } from '@renderer/lib/use-session'
 import { useActiveTab, useDocuments } from '@renderer/editor/store/document'
@@ -184,11 +185,21 @@ function useMenuCommands(): void {
         case 'save-as':
           saveAs()
           break
+        /*
+         * Undo and redo are the two commands that mean something different depending on
+         * where the caret is. A menu accelerator carries no target, so the focused element
+         * is the only thing that says whether Cmd+Z belongs to the text field the user is
+         * typing in or to the document — and sending it to the document while they type
+         * silently reverted the last canvas edit instead of their typing.
+         *
+         * The browser's own undo handles the field, so declining here is all that is
+         * needed; the cut/copy/paste items already use native roles for the same reason.
+         */
         case 'undo':
-          undo()
+          if (!isTypingFocused()) undo()
           break
         case 'redo':
-          redo()
+          if (!isTypingFocused()) redo()
           break
         case 'toggle-sidebar':
           panels.toggle('showSidebar')
