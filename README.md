@@ -19,6 +19,7 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | Reorder and reparent panes (z-order) | Working — buttons and Alt+arrows |
 | Align and distribute a multi-pane selection | Working |
 | Filter the pane hierarchy by name or kind | Working |
+| Zoom readout (click for 1:1) | Working |
 | Keyboard editing (nudge, delete, duplicate, undo) | Working — see Keyboard |
 | BYML documents | Read-only tree viewer (v1–7, both byte orders) |
 | Session restore | Offers the previous session on launch |

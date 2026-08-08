@@ -972,6 +972,7 @@ export function LayoutCanvas(): ReactNode {
       camera.x += before[0] - after[0]
       camera.y += before[1] - after[1]
       draw()
+      setInteractionTick((value) => value + 1)
       return
     }
 
@@ -981,6 +982,8 @@ export function LayoutCanvas(): ReactNode {
     camera.x += dx / camera.zoom
     camera.y -= dy / camera.zoom
     draw()
+    // Keeps the zoom readout and the overlay handles in step with the camera.
+    setInteractionTick((value) => value + 1)
   }
 
   wheelRef.current = onWheel
@@ -1091,6 +1094,23 @@ export function LayoutCanvas(): ReactNode {
         <span className="font-mono text-[11px] text-muted-foreground">
           {tab.document.info.width}×{tab.document.info.height}
         </span>
+        {/*
+          A zoom readout, because "am I at 100%?" decides whether the pixel positions
+          on screen mean anything — and it was previously unanswerable: zoom was only
+          reachable through pinch and Fit, and never shown. Clicking it snaps to 1:1.
+        */}
+        <button
+          type="button"
+          onClick={() => {
+            cameraRef.current.zoom = 1
+            setInteractionTick((value) => value + 1)
+            draw()
+          }}
+          title="Zoom — click for 1:1"
+          className="rounded px-1 font-mono text-[11px] text-muted-foreground hover:bg-accent"
+        >
+          {Math.round(cameraRef.current.zoom * 100)}%
+        </button>
       </div>
 
       <div

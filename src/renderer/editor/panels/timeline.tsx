@@ -32,7 +32,13 @@ import { usePlayback } from '@renderer/editor/store/playback'
  * with nothing to undo.
  */
 export function TimelinePanel(): ReactNode {
-  const [collapsed, setCollapsed] = useState(true)
+  /*
+   * Open by default. It used to start collapsed while the editor still reserved its
+   * full height for it, so showing the panel took two clicks and wasted the space in
+   * between — the toggle exists to get the height back, which only works if the panel
+   * is using it in the first place.
+   */
+  const [collapsed, setCollapsed] = useState(false)
   const tab = useActiveTab()
   const animationId = usePlayback((state) => state.animationId)
 

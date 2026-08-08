@@ -611,12 +611,20 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     const dock = [...document.querySelectorAll('section')]
       .find(s => s.textContent.trim().startsWith('ANIMATION') || s.textContent.trim().startsWith('Animation'))
     if (dock) {
-      const toggle = dock.querySelector('button')
-      toggle.click()
-      let row = null
-      for (let i = 0; i < 40 && !row; i++) {
-        await new Promise(r => setTimeout(r, 100))
-        row = [...dock.querySelectorAll('button')].find(b => b.textContent.includes('MainMenu_In.bflan'))
+      const findRow = () => [...dock.querySelectorAll('button')]
+        .find(b => b.textContent.includes('MainMenu_In.bflan'))
+
+      /*
+       * Only toggle if the list is not already showing. The panel opens expanded now,
+       * so an unconditional click on its first button collapsed it and found nothing.
+       */
+      let row = findRow()
+      if (!row) {
+        dock.querySelector('button').click()
+        for (let i = 0; i < 40 && !row; i++) {
+          await new Promise(r => setTimeout(r, 100))
+          row = findRow()
+        }
       }
 
       if (!row) {
