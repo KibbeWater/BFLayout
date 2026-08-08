@@ -825,6 +825,17 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     const tab = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'files')
     if (!tab) return { error: 'no files tab in the sidebar' }
     tab.click()
+    await new Promise(r => setTimeout(r, 300))
+
+    // This check is about tree mode, so make sure that is what is showing rather than
+    // trusting whatever the persisted setting happens to be.
+    const toTree = [...document.querySelectorAll('button')]
+      .find(b => (b.title || '').startsWith('Switch to an expanding tree'))
+    if (toTree) {
+      toTree.click()
+      await new Promise(r => setTimeout(r, 600))
+    }
+
     let rows = []
     for (let i = 0; i < 40 && rows.length === 0; i++) {
       await new Promise(r => setTimeout(r, 100))
@@ -841,16 +852,22 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     const archiveRow = after.find(b => b.textContent.includes('.blarc'))
     let openedTab = null
     if (archiveRow) {
-      // A tab is already open from the fixture, so wait for the count to *grow*.
-      // Reading the last tab without that check passes whether or not the click
-      // did anything, which is worse than no check at all.
-      const before = dev.documents.getState().tabs.length
+      /*
+       * Watch the *active document id*, not the tab count.
+       *
+       * Opening reuses the current tab when it holds no unsaved work, so counting tabs
+       * only detected a change when something earlier happened to leave one dirty — it
+       * passed or failed on unrelated state. The id changing is what "a layout opened"
+       * actually means, whether it landed in a new tab or replaced one.
+       */
+      const before = dev.documents.getState().activeId
       archiveRow.click()
-      for (let i = 0; i < 80 && dev.documents.getState().tabs.length === before; i++) {
+      for (let i = 0; i < 80 && dev.documents.getState().activeId === before; i++) {
         await new Promise(r => setTimeout(r, 100))
       }
-      const tabs = dev.documents.getState().tabs
-      openedTab = tabs.length > before ? tabs[tabs.length - 1].displayName : null
+      const state = dev.documents.getState()
+      const active = state.tabs.find(t => t.documentId === state.activeId)
+      openedTab = state.activeId !== before && active ? active.displayName : null
     }
     return { rows: rows.length, afterEnter: after.length, openedTab }
   })()`)) as {
@@ -1284,6 +1301,20 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       .find(i => (i.placeholder || '').startsWith('Filter panes'))
     if (!input) return { error: 'no pane filter input' }
 
+    /*
+     * The needle comes from a pane that is actually in the open document. Hardcoding a
+     * name from the fixture layout meant the check silently measured "nothing matches"
+     * whenever something earlier had opened a different layout.
+     */
+    const store = window.__bfdev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+    const names = []
+    const walk = (p) => { names.push(p.name); p.children.forEach(walk) }
+    walk(tab.document.rootPane)
+    const leaf = names.find(n => n && n !== tab.document.rootPane.name)
+    if (!leaf) return { error: 'the open layout has no named child pane' }
+
     const before = rows()
     const setValue = (value) => {
       const setter = Object.getOwnPropertyDescriptor(
@@ -1293,7 +1324,7 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       input.dispatchEvent(new Event('input', { bubbles: true }))
     }
 
-    setValue('Start')
+    setValue(leaf)
     await new Promise(r => setTimeout(r, 400))
     const filtered = rows()
 
@@ -1561,6 +1592,17 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
 
       const aside = document.querySelector('aside')
       const rendered = aside ? aside.querySelectorAll('button').length : -1
+
+      /*
+       * Put the view mode back. It is persisted in sqlite, so leaving it on "list"
+       * changed the state the *next* run started in — and the tree-mode check then
+       * counted windowed rows and failed for a reason nothing in it could explain.
+       */
+      const back = [...document.querySelectorAll('button')]
+        .find(b => (b.title || '').startsWith('Switch to an expanding tree'))
+      if (back) back.click()
+      await new Promise(r => setTimeout(r, 500))
+
       return { count: biggest.count, rendered, elapsed: Math.round(elapsed) }
     })()`)) as { error?: string; count?: number; rendered?: number; elapsed?: number }
 

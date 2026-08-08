@@ -26,7 +26,7 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | BNTX textures | Decode and preview (BC1–BC5, all ASTC LDR block sizes, uncompressed; no BC6H/BC7) |
 | BFLAN animation | Parse, play, scrub, inspect keyframes (no keyframe editing) |
 | Canvas resize handles, rubber-band select, alignment guides | Working |
-| Folder / romfs browsing | Working (tree or list, lazy per directory) |
+| Folder / romfs browsing | Working (tree or list, lazy per directory, windowed rows) |
 | Materials list | Working (usage counts, shared-material warnings) |
 | Show / hide panels, native menu bar | Working |
 | prt1 external part resolution | Working (parts draw their referenced layout) |
