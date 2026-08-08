@@ -26,9 +26,10 @@
     "src/main/**/*.ts",
     "src/shared/**/*.ts",
     "tests/**/*.ts",
-    // Renderer undo commands are pure document manipulation with no DOM use, and
-    // tests/commands.test.ts covers them, so this project needs to see the file.
+    // Renderer modules that are pure state/document manipulation with no DOM use, and
+    // are covered by tests in tests/, so this project needs to see them.
     "src/renderer/editor/commands.ts",
+    "src/renderer/editor/store/document.ts",
     "electron.vite.config.ts",
     "drizzle.config.ts",
     "vitest.config.ts"

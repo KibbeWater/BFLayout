@@ -320,13 +320,19 @@ export function movePane(
     newParent.children.splice(index, 0, pane)
 
     /*
-     * Both parents are dirtied as well as the pane. A pane's own section carries its
-     * properties, but its *position in the stream* is what encodes the tree, so the
-     * parents have to be re-emitted rather than replayed from their original bytes.
+     * Nothing is dirtied, deliberately.
+     *
+     * A pane's section encodes its own properties, never its position: the writer walks
+     * the model tree and *generates* the `pas1`/`pae1` push/pop markers around each
+     * pane's children (see `emitPane` in shared/formats/bflyt/layout.ts), so a clean
+     * pane's preserved bytes stay correct wherever it or its siblings end up.
+     *
+     * Marking the parents dirty — which this first did, on the theory that position was
+     * part of their bytes — cost byte-exactness for nothing, and was actively harmful
+     * for `prt1`: a full re-encode of a part pane loses its offset-addressed override
+     * data, so reordering the children of one would have corrupted data the user never
+     * touched.
      */
-    pane.dirty = true
-    oldParent.dirty = true
-    newParent.dirty = true
   }
 
   const label = `Move ${

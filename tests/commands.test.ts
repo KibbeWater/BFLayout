@@ -414,9 +414,14 @@ describe('movePane', () => {
     expect(movePane(document, document.rootPane!.id, { parentId: 'x', index: 0 })).toBeNull()
   })
 
-  it('dirties both parents as well as the pane', () => {
-    // A pane's position in the stream encodes the tree, so the parents have to be
-    // re-emitted rather than replayed from their original bytes.
+  it('dirties nothing, because position is not part of any pane bytes', () => {
+    /*
+     * The writer generates the pas1/pae1 markers from the model tree and replays each
+     * clean pane's own bytes, so moving a pane changes nobody's section. Dirtying the
+     * parents would cost byte-exactness for nothing — and for a prt1 part pane, a full
+     * re-encode loses its offset-addressed override data, so it would corrupt a pane
+     * the user never edited.
+     */
     const { document, a, b } = threeSiblings()
     const root = document.rootPane!
     root.dirty = false
@@ -424,9 +429,9 @@ describe('movePane', () => {
     a.dirty = false
 
     movePane(document, a.id, { parentId: b.id, index: 0 })!.apply(document)
-    expect(a.dirty).toBe(true)
-    expect(b.dirty).toBe(true)
-    expect(root.dirty).toBe(true)
+    expect(a.dirty).toBe(false)
+    expect(b.dirty).toBe(false)
+    expect(root.dirty).toBe(false)
   })
 
   it('clamps an out-of-range index rather than leaving a hole', () => {

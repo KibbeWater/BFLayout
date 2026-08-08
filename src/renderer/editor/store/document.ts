@@ -214,10 +214,23 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
         if (tab.documentId !== state.activeId) return tab
         command.apply(tab.document)
         const history = pushCommand(tab.history, command)
-        // The stack is bounded, so a push can drop the oldest entry instead of growing.
-        // Once that happens the recorded depth no longer names the saved state.
+
+        /*
+         * The save point can stop identifying the saved state in two ways, and both
+         * have to invalidate it or a diverged document reports itself clean.
+         *
+         * 1. The bounded stack drops its oldest entry instead of growing, so every
+         *    depth now refers to a different state.
+         * 2. The save point lives in the redo branch this command is about to discard.
+         *    Undo past a save, then make a different edit: the new command lands at the
+         *    same depth the save recorded, so `unsaved` flipped back to false while the
+         *    document held the new edit and the disk held the old one. Every guard built
+         *    on this — the close prompt, the tab-close confirmation, tab reuse — then
+         *    treated the tab as safe to discard.
+         */
         const trimmed = history.undo.length === tab.history.undo.length
-        const savedDepth = trimmed ? -1 : tab.savedDepth
+        const divergedFromSavePoint = tab.savedDepth > tab.history.undo.length
+        const savedDepth = trimmed || divergedFromSavePoint ? -1 : tab.savedDepth
         return {
           ...tab,
           history,

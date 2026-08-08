@@ -103,6 +103,14 @@ interface DragState {
   readonly startY: number
   readonly origins: Map<string, [number, number]>
   /**
+   * Each moving pane's parent transform, captured once.
+   *
+   * `translate` is expressed in the parent's space, so a world-space pointer delta has
+   * to be converted per pane — and a rotated or scaled ancestor makes that a different
+   * conversion for each one rather than a shared offset.
+   */
+  readonly parents: Map<string, PaneTransform>
+  /**
    * The dragged pane's world bounds as they were when the drag began.
    *
    * Captured once rather than read from `renderer.flattened` each frame. That array
@@ -154,7 +162,13 @@ export function LayoutCanvas(): ReactNode {
    * The last click point and how far down the overlapping stack it reached, so a
    * second click at the same spot selects the pane underneath.
    */
-  const cycleRef = useRef<{ x: number; y: number; index: number } | null>(null)
+  const cycleRef = useRef<{
+    x: number
+    y: number
+    index: number
+    /** True once the press ended without a drag, which is what advances the cycle. */
+    clicked: boolean
+  } | null>(null)
 
   const [glError, setGlError] = useState<string | null>(null)
   const [showGrid, setShowGrid] = useState(true)
@@ -244,7 +258,9 @@ export function LayoutCanvas(): ReactNode {
        * path does it: a child already moves with its parent's translate, so nudging
        * both moved the child twice as far.
        */
-      const moving = independentSelection(rendererRef.current?.flattened ?? [], paneIds)
+      // The GL error screen keeps the document editable but disposes the renderer, so
+      // fall back to walking the tree rather than losing ancestor filtering.
+      const moving = independentSelection(flattenedFor(tab.document), paneIds)
 
       const moves = moving
         .map((id) => paneById(tab.document, id))
@@ -280,7 +296,7 @@ export function LayoutCanvas(): ReactNode {
      * copies its whole subtree, so duplicating both produced the child twice — once
      * inside the parent's copy and once beside the original.
      */
-    const roots = independentSelection(rendererRef.current?.flattened ?? [], paneIds)
+    const roots = independentSelection(flattenedFor(tab.document), paneIds)
 
     // Built and applied one at a time so each copy sees the names the previous one
     // took, and so the insert indices stay valid.
@@ -327,9 +343,22 @@ export function LayoutCanvas(): ReactNode {
     const tab = state.tabs.find((entry) => entry.documentId === state.activeId)
     if (!tab) return
 
-    const roots = independentSelection(rendererRef.current?.flattened ?? [], paneIds)
-    // Raising walks from the top down so panes do not step over each other.
-    const ordered = move === 'raise' ? [...roots].reverse() : roots
+    const flattened = flattenedFor(tab.document)
+    const roots = independentSelection(flattened, paneIds)
+
+    /*
+     * Sorted by tree position, then reversed for `raise`.
+     *
+     * Selection order is click order, which has nothing to do with sibling order, so
+     * applying moves in it made a multi-pane raise step panes over each other and come
+     * out unchanged: selecting B then A and raising gave [B,A] -> reversed [A,B] ->
+     * raise A past B, then raise B past A, back where it started.
+     */
+    const treeOrder = new Map(flattened.map((entry, index) => [entry.pane.id, index]))
+    const sorted = [...roots].sort(
+      (a, b) => (treeOrder.get(a) ?? 0) - (treeOrder.get(b) ?? 0)
+    )
+    const ordered = move === 'raise' ? sorted.reverse() : sorted
 
     const commands: Command[] = []
     for (const id of ordered) {
@@ -652,13 +681,22 @@ export function LayoutCanvas(): ReactNode {
      * select-behind works in editors that have it.
      */
     const stack = hitTestAll(renderer.flattened, x, y, { includeHidden: showInvisible })
+
+    /*
+     * The cycle only advances after a press that turned out to be a *click*, which
+     * `endInteraction` records. Advancing on pointer-down instead meant pressing again
+     * on a pane you had just selected — the ordinary way to start dragging it — grabbed
+     * the pane behind, and the only way to drag the pane you could see was to press
+     * more than a few pixels from where you selected it.
+     */
     const previous = cycleRef.current
     const samePoint =
       previous !== null &&
+      previous.clicked &&
       Math.abs(previous.x - x) <= CYCLE_TOLERANCE / cameraRef.current.zoom &&
       Math.abs(previous.y - y) <= CYCLE_TOLERANCE / cameraRef.current.zoom
     const index = samePoint && stack.length > 1 ? (previous.index + 1) % stack.length : 0
-    cycleRef.current = stack.length > 0 ? { x, y, index } : null
+    cycleRef.current = stack.length > 0 ? { x, y, index, clicked: false } : null
 
     const hit = stack[index] ?? null
 
@@ -701,11 +739,21 @@ export function LayoutCanvas(): ReactNode {
         ? undefined
         : renderer.flattened.find((candidate) => candidate.pane.id === single)
 
+    const parents = new Map<string, PaneTransform>()
+    for (const id of origins.keys()) {
+      const placement = parentOf(tab.document, id)
+      const parentEntry = placement
+        ? renderer.flattened.find((candidate) => candidate.pane.id === placement.id)
+        : undefined
+      if (parentEntry) parents.set(id, parentEntry)
+    }
+
     dragRef.current = {
       paneIds: [...origins.keys()],
       startX: x,
       startY: y,
       origins,
+      parents,
       originBounds: singleEntry ? worldBounds(singleEntry) : null
     }
     capturePointer(event)
@@ -834,8 +882,23 @@ export function LayoutCanvas(): ReactNode {
       if (!origin) continue
       const pane = findById(tab.document.rootPane, paneId)
       if (!pane) continue
-      pane.translate[0] = place(origin[0] + dx) + guideDx
-      pane.translate[1] = place(origin[1] + dy) + guideDy
+
+      /*
+       * The pointer delta is in world space; `translate` is in the parent's. They are
+       * the same thing only while every ancestor is unrotated and unscaled — under a
+       * rotated parent the pane used to slide off at an angle to the cursor. The resize
+       * path and the arrange commands both convert; this one did not.
+       */
+      const parentEntry = drag.parents.get(paneId)
+      const [localDx, localDy] = parentEntry
+        ? toLocalDelta(parentEntry, dx, dy)
+        : [dx, dy]
+      const [localGuideDx, localGuideDy] = parentEntry
+        ? toLocalDelta(parentEntry, guideDx, guideDy)
+        : [guideDx, guideDy]
+
+      pane.translate[0] = place(origin[0] + localDx) + localGuideDx
+      pane.translate[1] = place(origin[1] + localDy) + localGuideDy
       markPaneDirty(tab.document, paneId)
     }
     setInteractionTick((value) => value + 1)
@@ -933,6 +996,22 @@ export function LayoutCanvas(): ReactNode {
       }
     }
 
+    /*
+     * A press that moved nothing was a click, which is what lets the next press at the
+     * same point select the pane behind. A press that dragged is not, so dragging a pane
+     * repeatedly never walks down the stack.
+     */
+    const cycle = cycleRef.current
+    if (cycle) {
+      const moved = drag
+        ? [...drag.origins].some(([id, origin]) => {
+            const pane = findById(tab?.document.rootPane ?? null, id)
+            return pane !== null && (pane.translate[0] !== origin[0] || pane.translate[1] !== origin[1])
+          })
+        : false
+      cycle.clicked = !moved
+    }
+
     dragRef.current = null
     panRef.current = null
     marqueeRef.current = null
@@ -1005,6 +1084,9 @@ export function LayoutCanvas(): ReactNode {
       )
     )
     draw()
+    // Without this the zoom readout keeps its old number and the DOM resize handles
+    // stay at their pre-fit screen positions until something else re-renders.
+    setInteractionTick((value) => value + 1)
   }
   fitRef.current = fitToLayout
 
@@ -1266,6 +1348,17 @@ function capturePointer(event: React.PointerEvent<HTMLDivElement>): void {
   } catch {
     // Without capture the drag still works while the cursor stays over the canvas.
   }
+}
+
+/**
+ * The flattened tree, from the renderer when it exists and computed otherwise.
+ *
+ * The GL error screen tells the user the layout is still editable, but it disposes the
+ * renderer — so keyboard commands would have seen an empty array and silently lost their
+ * ancestor filtering, double-moving a child whose parent was also selected.
+ */
+function flattenedFor(document: LayoutDocument): readonly PaneTransform[] {
+  return document.rootPane ? flattenPanes(document.rootPane) : []
 }
 
 /** The pane that has `paneId` as a direct child, or null for the root. */

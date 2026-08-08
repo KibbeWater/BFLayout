@@ -1515,6 +1515,73 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     `main learned the work was saved (back to ${getUnsavedCount()})`
   )
 
+  /*
+   * The flat file list windows its rows. A romfs is not a gentle input: this game's
+   * Tex/ holds 29,342 files, and rendering a DOM node for each meant building tens of
+   * thousands of elements before anything appeared — then again on every keystroke of
+   * the filter.
+   */
+  const romfsRoot = process.env['BFLAYOUT_SELFTEST_ROMFS'] ?? ''
+  if (!romfsRoot) {
+    out.push('SKIP windowed file list (BFLAYOUT_SELFTEST_ROMFS not set)')
+  } else {
+    const windowed = (await win.webContents.executeJavaScript(`(async () => {
+      const dev = window.__bfdev
+      const c = window.__bfclient
+
+      /*
+       * Switch to list view through the toolbar toggle, not by patching settings.
+       * Panel state reaches the UI via the query cache, which only the mutation path
+       * invalidates — patching directly leaves the browser in tree mode and the check
+       * silently measures the wrong thing.
+       */
+      dev.folder.getState().open(${JSON.stringify(romfsRoot)})
+      await new Promise(r => setTimeout(r, 700))
+      const toggle = [...document.querySelectorAll('button')]
+        .find(b => (b.title || '').startsWith('Switch to a flat list'))
+      if (!toggle) return { error: 'no list-view toggle in the folder toolbar' }
+      toggle.click()
+      await new Promise(r => setTimeout(r, 700))
+
+      // Find the biggest directory under the root and open it.
+      const top = await c.folder.list({ path: ${JSON.stringify(romfsRoot)} })
+      let biggest = null
+      for (const dir of top.entries.filter(e => e.kind === 'directory')) {
+        const listing = await c.folder.list({ path: dir.path })
+        if (!biggest || listing.entries.length > biggest.count) {
+          biggest = { path: dir.path, count: listing.entries.length }
+        }
+      }
+      if (!biggest) return { error: 'no directories under the romfs root' }
+
+      const started = performance.now()
+      dev.folder.getState().navigate(biggest.path)
+      await new Promise(r => setTimeout(r, 1200))
+      const elapsed = performance.now() - started
+
+      const aside = document.querySelector('aside')
+      const rendered = aside ? aside.querySelectorAll('button').length : -1
+      return { count: biggest.count, rendered, elapsed: Math.round(elapsed) }
+    })()`)) as { error?: string; count?: number; rendered?: number; elapsed?: number }
+
+    if (windowed.error) {
+      check(false, `windowed list: ${windowed.error}`)
+    } else {
+      const count = windowed.count ?? 0
+      const rendered = windowed.rendered ?? 0
+      check(count > 1000, `found a directory with ${count} entries to stress the list`)
+      // The whole point: rows on screen, not rows in the directory.
+      check(
+        rendered > 0 && rendered < 400,
+        `showing ${count} entries rendered only ${rendered} buttons`
+      )
+      check(
+        (windowed.elapsed ?? 99999) < 3000,
+        `opening it took ${windowed.elapsed}ms`
+      )
+    }
+  }
+
   // Fit and deselect before the capture, so the screenshot shows the layout rather
   // than whatever corner the camera happened to be in.
   await win.webContents.executeJavaScript(`(async () => {

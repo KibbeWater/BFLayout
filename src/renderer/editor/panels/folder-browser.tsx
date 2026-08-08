@@ -28,6 +28,7 @@ import { describeError } from '@renderer/lib/errors'
 import { reportError, reportInfo, reportSuccess } from '@renderer/lib/toast'
 import { useOpenFile } from '@renderer/lib/use-open-file'
 import { useFolder } from '@renderer/editor/store/folder'
+import { WindowedList } from '@renderer/components/windowed-list'
 
 /**
  * Browses a folder on disk, built for a dumped romfs.
@@ -101,13 +102,17 @@ export function FolderBrowser(): ReactNode {
           patch.mutate({ folderViewMode: mode === 'tree' ? 'list' : 'tree' })
         }
       />
-      <div className="min-h-0 flex-1 overflow-auto p-1">
-        {mode === 'tree' ? (
+      {/*
+        List mode owns its own scrolling, because it windows its rows and has to know
+        the viewport height. Tree mode still scrolls in a plain container.
+      */}
+      {mode === 'tree' ? (
+        <div className="min-h-0 flex-1 overflow-auto p-1">
           <DirectoryNode path={root} depth={0} defaultOpen />
-        ) : (
-          <FlatList path={root} />
-        )}
-      </div>
+        </div>
+      ) : (
+        <FlatList path={root} />
+      )}
     </div>
   )
 }
@@ -220,6 +225,16 @@ function DirectoryNode({
 }): ReactNode {
   const orpc = getOrpc()
   const [open, setOpen] = useState(defaultOpen)
+  /**
+   * How many children to render.
+   *
+   * A romfs directory can be enormous — this game's `Tex/` holds 29,342 files — and
+   * the tree rendered a node for every one, which took seconds and left tens of
+   * thousands of elements behind. The flat list windows its rows instead, but a
+   * recursive tree has no fixed row height to window by, so it is capped and says so.
+   * The cap is never silent: the remaining count is shown with a button to go further.
+   */
+  const [shown, setShown] = useState(TREE_PAGE)
 
   const query = useQuery({
     ...orpc.folder.list.queryOptions({ input: { path } }),
@@ -260,18 +275,34 @@ function DirectoryNode({
               empty
             </p>
           ) : (
-            query.data.entries.map((entry) =>
-              entry.kind === 'directory' ? (
-                <DirectoryNode
-                  key={entry.path}
-                  path={entry.path}
-                  name={entry.name}
-                  depth={depth + 1}
-                />
-              ) : (
-                <FileRow key={entry.path} entry={entry} depth={depth + 1} />
-              )
-            )
+            <>
+              {query.data.entries.slice(0, shown).map((entry) =>
+                entry.kind === 'directory' ? (
+                  <DirectoryNode
+                    key={entry.path}
+                    path={entry.path}
+                    name={entry.name}
+                    depth={depth + 1}
+                  />
+                ) : (
+                  <FileRow key={entry.path} entry={entry} depth={depth + 1} />
+                )
+              )}
+              {query.data.entries.length > shown ? (
+                <button
+                  type="button"
+                  onClick={() => setShown((value) => value + TREE_PAGE)}
+                  style={{ paddingLeft: (depth + 1) * 12 + 20 }}
+                  className="flex w-full items-center gap-1 py-0.5 text-left text-[10px] text-primary hover:underline"
+                >
+                  {(query.data.entries.length - shown).toLocaleString()} more —
+                  show {Math.min(TREE_PAGE, query.data.entries.length - shown)}
+                  <span className="text-muted-foreground/60">
+                    (or switch to list view to filter them)
+                  </span>
+                </button>
+              ) : null}
+            </>
           )
         ) : (
           <p
@@ -312,7 +343,7 @@ function FlatList({ path }: { path: string }): ReactNode {
     ? query.data.entries.filter((entry) => entry.name.toLowerCase().includes(needle))
     : query.data.entries
 
-  return (
+  const header = (
     <>
       <div className="sticky top-0 z-10 mb-1 flex items-center gap-1 bg-card/95 pb-1">
         <input
@@ -336,28 +367,55 @@ function FlatList({ path }: { path: string }): ReactNode {
         <p className="p-2 text-xs text-muted-foreground/60">
           {needle ? 'Nothing matches that filter.' : 'This folder is empty.'}
         </p>
-      ) : (
-        entries.map((entry) =>
-          entry.kind === 'directory' ? (
-            <button
-              key={entry.path}
-              type="button"
-              onClick={() => navigate(entry.path)}
-              className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-accent/60"
-              title={entry.path}
-            >
-              {KIND_ICON.directory}
-              <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-              <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" />
-            </button>
-          ) : (
-            <FileRow key={entry.path} entry={entry} depth={0} />
-          )
-        )
-      )}
+      ) : null}
     </>
   )
+
+  return (
+    <WindowedList
+      items={entries}
+      rowHeight={FLAT_ROW_HEIGHT}
+      header={header}
+      className="min-h-0 flex-1 overflow-auto p-1"
+      keyOf={(entry) => entry.path}
+      renderRow={(entry) =>
+        entry.kind === 'directory' ? (
+          <button
+            type="button"
+            onClick={() => navigate(entry.path)}
+            className="flex h-full w-full items-center gap-1.5 rounded px-1.5 text-left text-xs hover:bg-accent/60"
+            title={entry.path}
+          >
+            {KIND_ICON.directory}
+            <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+            <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" />
+          </button>
+        ) : (
+          <FileRow entry={entry} depth={0} />
+        )
+      }
+    />
+  )
 }
+
+/**
+ * Row height in the flat list, which the windower needs to know up front.
+ *
+ * Matches `text-xs` (16px of line box) plus the row's vertical padding. Rows are
+ * stretched to fill it rather than sized by their content, so a row that grows would
+ * be clipped instead of silently drifting the spacers out of step.
+ */
+const FLAT_ROW_HEIGHT = 24
+
+/**
+ * How many children the tree renders per page.
+ *
+ * Chosen to clear real directories in one go — this game's largest layout folder holds
+ * 544 files — while still bounding the pathological ones: `Tex/` has 29,342 and `Icon/`
+ * 11,425, and rendering those took seconds. A thousand rows is comfortable; thirty
+ * thousand is not.
+ */
+const TREE_PAGE = 1000
 
 function ListError({
   depth,

@@ -822,6 +822,30 @@ function Row({ children }: { children: ReactNode }): ReactNode {
 }
 
 /**
+ * Discards a pending draft when the model value moves underneath it.
+ *
+ * These fields hold uncommitted text until blur, and they live at a stable position in
+ * the tree — so selecting a different pane re-renders the same component with a new
+ * `value` and a new `onChange` while the draft is still showing. Blurring then committed
+ * the text typed for the *previous* pane onto the new one, losing one edit and inventing
+ * another. Undo has the same shape: the model changes without the field being touched.
+ *
+ * Adjusting state during render is the pattern React prescribes for this, and avoids the
+ * extra commit an effect would cost.
+ */
+function useDraftReset(
+  value: string,
+  draft: string | null,
+  setDraft: (draft: string | null) => void
+): void {
+  const seen = useRef(value)
+  if (seen.current !== value) {
+    seen.current = value
+    if (draft !== null) setDraft(null)
+  }
+}
+
+/**
  * A text input that commits on blur or Enter, and abandons on Escape.
  *
  * Committing per keystroke pushed one undo entry per character: renaming a pane cost
@@ -841,6 +865,7 @@ function TextField({
   const [draft, setDraft] = useState<string | null>(null)
   // See NumberField: blur fires synchronously from blur(), before React flushes.
   const cancelling = useRef(false)
+  useDraftReset(value, draft, setDraft)
 
   const commit = (text: string): void => {
     setDraft(null)
@@ -887,6 +912,7 @@ function TextArea({
 }): ReactNode {
   const [draft, setDraft] = useState<string | null>(null)
   const cancelling = useRef(false)
+  useDraftReset(value, draft, setDraft)
 
   const commit = (text: string): void => {
     setDraft(null)
@@ -938,6 +964,7 @@ function NumberField({
    * The value is committed on blur and on Enter instead.
    */
   const [draft, setDraft] = useState<string | null>(null)
+  useDraftReset(String(value), draft, setDraft)
 
   /**
    * Set while Escape is abandoning an edit, so the blur it triggers does not commit.

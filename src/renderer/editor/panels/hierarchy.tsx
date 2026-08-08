@@ -199,9 +199,9 @@ function PaneActions(): ReactNode {
   const selected = tab && selectedId ? paneById(tab.document, selectedId) : null
   const isRoot = selected !== null && selected?.id === tab?.document.rootPane?.id
 
-  // A full tree walk, memoised on the document revision. As in MaterialsPanel this
-  // helps for re-renders the document did not cause, but not during a drag, which
-  // bumps the revision every frame.
+  // A full tree walk, memoised on the document revision. A drag no longer bumps the
+  // revision — it mutates in place and redraws locally — so this now genuinely keeps
+  // the walk off the drag path as well as off unrelated re-renders.
   const document = tab?.document
   const revision = tab?.revision
   const paneCount = useMemo(
