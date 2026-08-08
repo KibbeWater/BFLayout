@@ -14,6 +14,8 @@ import {
 
 import type { ArchiveEntryInfo } from '@shared/contract'
 import { getOrpc } from '@renderer/lib/orpc'
+import { describeError } from '@renderer/lib/errors'
+import { reportInfo } from '@renderer/lib/toast'
 import { useOpenLayout } from '@renderer/lib/use-open-layout'
 import { useWorkspace } from '@renderer/editor/store/workspace'
 
@@ -81,9 +83,13 @@ export function ArchiveBrowser(): ReactNode {
   }
 
   if (archive.isError) {
+    // The typed-error chain carries the format, byte offset and section all the way
+    // here; a fixed "could not be read" threw all of that away.
+    const described = describeError(archive.error)
     return (
       <div className="p-3">
-        <p className="text-xs text-muted-foreground">This archive could not be read.</p>
+        <p className="text-xs font-medium">{described.title}</p>
+        <p className="mt-1 text-[11px] text-muted-foreground">{described.detail}</p>
         <button
           type="button"
           onClick={() => void archive.refetch()}
@@ -143,7 +149,18 @@ export function ArchiveBrowser(): ReactNode {
                             { kind: 'archive', archiveId, entryKey: entry.key },
                             event.metaKey || event.ctrlKey || event.shiftKey
                           )
+                          return
                         }
+                        // Anything else has no viewer here. Saying so beats a click
+                        // that selects a row and appears to do nothing.
+                        reportInfo(
+                          `Cannot open ${leaf}`,
+                          entry.kind === 'texture'
+                            ? 'Textures are listed in the Textures tab, alongside the layout that uses them.'
+                            : entry.kind === 'animation'
+                              ? 'Animations are listed in the timeline once their layout is open.'
+                              : `${leaf} is a ${entry.kind} entry; this editor opens the layouts in an archive.`
+                        )
                       }}
                       onAuxClick={(event) => {
                         if (event.button !== 1 || entry.kind !== 'layout') return

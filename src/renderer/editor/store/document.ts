@@ -58,6 +58,11 @@ interface DocumentStore {
   setActive: (documentId: string) => void
   select: (paneIds: string[]) => void
   toggleCollapsed: (paneId: string) => void
+  /**
+   * Expands whatever is hiding a pane, so a selection made elsewhere is visible in
+   * the tree. Selecting on the canvas otherwise leaves it collapsed and invisible.
+   */
+  revealPane: (paneId: string) => void
   /** Applies a mutation to the active document and marks it unsaved. */
   mutate: (recipe: (tab: DocumentTab) => void) => void
   /** Runs a command and records it so it can be undone. */
@@ -126,6 +131,33 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
       tabs: state.tabs.map((tab) =>
         tab.documentId === state.activeId ? { ...tab, selectedPaneIds: paneIds } : tab
       )
+    })),
+
+  revealPane: (paneId) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) => {
+        if (tab.documentId !== state.activeId) return tab
+        if (tab.collapsedIds.size === 0) return tab
+
+        // Walk down to the pane, collecting the branches that contain it.
+        const ancestors: string[] = []
+        const find = (pane: Pane): boolean => {
+          if (pane.id === paneId) return true
+          for (const child of pane.children) {
+            if (find(child)) {
+              ancestors.push(pane.id)
+              return true
+            }
+          }
+          return false
+        }
+        if (!tab.document.rootPane || !find(tab.document.rootPane)) return tab
+        if (!ancestors.some((id) => tab.collapsedIds.has(id))) return tab
+
+        const collapsedIds = new Set(tab.collapsedIds)
+        for (const id of ancestors) collapsedIds.delete(id)
+        return { ...tab, collapsedIds }
+      })
     })),
 
   toggleCollapsed: (paneId) =>

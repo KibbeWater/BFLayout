@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   ChevronDown,
   ChevronRight,
@@ -49,6 +49,14 @@ const KIND_META: Record<PaneKind, { icon: ReactNode; label: string }> = {
 
 export function HierarchyPanel(): ReactNode {
   const tab = useActiveTab()
+  const revealPane = useDocuments((state) => state.revealPane)
+
+  // Expand whatever is hiding the selection, so a pane picked on the canvas is
+  // actually visible in the tree rather than inside a collapsed branch.
+  const firstSelected = tab?.selectedPaneIds[0]
+  useEffect(() => {
+    if (firstSelected) revealPane(firstSelected)
+  }, [firstSelected, revealPane])
 
   if (!tab) {
     return (
@@ -196,6 +204,18 @@ function PaneRow({ pane, depth }: { pane: Pane; depth: number }): ReactNode {
   const meta = KIND_META[pane.kind]
 
   // Hiding a pane is an edit like any other, so it belongs on the undo stack.
+  /**
+   * Scrolls a pane into view when it becomes selected somewhere else.
+   *
+   * Selecting on the canvas used to leave the tree wherever it was, so on a deep
+   * layout you would select something and see no change here at all.
+   */
+  const rowRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!selected) return
+    rowRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [selected])
+
   const toggleVisible = (): void => {
     const before = snapshotPane(pane)
     pane.visible = !pane.visible
@@ -213,6 +233,7 @@ function PaneRow({ pane, depth }: { pane: Pane; depth: number }): ReactNode {
   return (
     <>
       <div
+        ref={rowRef}
         className={`group flex items-center gap-1 pr-2 hover:bg-accent/60 ${
           selected ? 'bg-accent' : ''
         }`}
@@ -229,7 +250,19 @@ function PaneRow({ pane, depth }: { pane: Pane; depth: number }): ReactNode {
 
         <button
           type="button"
-          onClick={() => select([pane.id])}
+          // Shift or Cmd extends the selection, matching the canvas marquee. The
+          // store has always held an array; only the canvas could fill it.
+          onClick={(event) => {
+            if (event.shiftKey || event.metaKey || event.ctrlKey) {
+              select(
+                selected
+                  ? tab.selectedPaneIds.filter((id) => id !== pane.id)
+                  : [...tab.selectedPaneIds, pane.id]
+              )
+            } else {
+              select([pane.id])
+            }
+          }}
           className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left"
           title={`${meta.label} · ${pane.name}`}
         >
