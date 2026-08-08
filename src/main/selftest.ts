@@ -878,6 +878,42 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     )
   }
 
+  /*
+   * Drive a command down the real menu path: main sends `menu-command`, the
+   * preload bridge relays it, the renderer acts.
+   *
+   * This exists because the whole menu bar shipped inert — the preload exposed
+   * only `platform`, so `onMenuCommand` was undefined and both consumers bailed
+   * out of their `if (!api?.onMenuCommand) return` guard. Every accelerator
+   * including Cmd+S silently did nothing. The panel check above could not catch it
+   * because it clicks the toolbar button instead, and everything else here drives
+   * the store through `__bfdev`. Nothing crossed the IPC boundary the menu uses.
+   */
+  const menuResult = (await win.webContents.executeJavaScript(`(async () => {
+    const asides = () => document.querySelectorAll('aside').length
+    window.__bfdevMenu = { before: asides() }
+    return window.__bfdevMenu.before
+  })()`)) as number
+
+  win.webContents.send('menu-command', 'toggle-properties')
+  const afterMenuHide = (await win.webContents.executeJavaScript(`(async () => {
+    await new Promise(r => setTimeout(r, 500))
+    return document.querySelectorAll('aside').length
+  })()`)) as number
+
+  check(
+    afterMenuHide === menuResult - 1,
+    `a native menu command reached the renderer (${menuResult} -> ${afterMenuHide} regions)`
+  )
+
+  // Put it back, which also proves the command is not a one-shot.
+  win.webContents.send('menu-command', 'toggle-properties')
+  const afterMenuShow = (await win.webContents.executeJavaScript(`(async () => {
+    await new Promise(r => setTimeout(r, 500))
+    return document.querySelectorAll('aside').length
+  })()`)) as number
+  check(afterMenuShow === menuResult, `the menu restored the region (${afterMenuShow})`)
+
   // Fit and deselect before the capture, so the screenshot shows the layout rather
   // than whatever corner the camera happened to be in.
   await win.webContents.executeJavaScript(`(async () => {

@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useMemo, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import type { PanelKey } from '@shared/contract'
@@ -44,36 +44,65 @@ export function usePanels(): PanelVisibility {
   const showProperties = settings.data?.showProperties ?? true
   const showTimeline = settings.data?.showTimeline ?? true
 
-  const current: Record<PanelKey, boolean> = {
+  /**
+   * Current values behind a ref so `toggle` can read them without listing them as
+   * dependencies.
+   *
+   * Identity matters more than it looks here: `useMenuCommands` depends on the
+   * whole object this hook returns, and re-subscribing tears down and re-registers
+   * the menu IPC listener. When `toggle` closed over a fresh object literal that
+   * happened on every render of the editor — including all sixty of them per second
+   * during a canvas drag.
+   */
+  const currentRef = useRef<Record<PanelKey, boolean>>({
     showSidebar,
     showHierarchy,
     showProperties,
     showTimeline
-  }
+  })
+  currentRef.current = { showSidebar, showHierarchy, showProperties, showTimeline }
 
-  const set = useCallback(
-    (key: PanelKey, value: boolean) => patch.mutate({ [key]: value }),
-    [patch]
-  )
+  // `mutate` is a stable reference in React Query v5, unlike the mutation object.
+  const { mutate } = patch
 
-  const toggle = useCallback((key: PanelKey) => set(key, !current[key]), [set, current])
+  const set = useCallback((key: PanelKey, value: boolean) => mutate({ [key]: value }), [mutate])
+
+  const toggle = useCallback((key: PanelKey) => set(key, !currentRef.current[key]), [set])
 
   const setSize = useCallback(
     (key: 'sidebarWidth' | 'propertiesWidth' | 'timelineHeight', value: number) =>
-      patch.mutate({ [key]: Math.round(value) }),
-    [patch]
+      mutate({ [key]: Math.round(value) }),
+    [mutate]
   )
 
-  return {
-    showSidebar,
-    showHierarchy,
-    showProperties,
-    showTimeline,
-    toggle,
-    set,
-    sidebarWidth: settings.data?.sidebarWidth ?? 288,
-    propertiesWidth: settings.data?.propertiesWidth ?? 320,
-    timelineHeight: settings.data?.timelineHeight ?? 220,
-    setSize
-  }
+  const sidebarWidth = settings.data?.sidebarWidth ?? 288
+  const propertiesWidth = settings.data?.propertiesWidth ?? 320
+  const timelineHeight = settings.data?.timelineHeight ?? 220
+
+  return useMemo(
+    () => ({
+      showSidebar,
+      showHierarchy,
+      showProperties,
+      showTimeline,
+      toggle,
+      set,
+      sidebarWidth,
+      propertiesWidth,
+      timelineHeight,
+      setSize
+    }),
+    [
+      showSidebar,
+      showHierarchy,
+      showProperties,
+      showTimeline,
+      toggle,
+      set,
+      sidebarWidth,
+      propertiesWidth,
+      timelineHeight,
+      setSize
+    ]
+  )
 }

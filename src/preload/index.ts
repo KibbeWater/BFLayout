@@ -21,5 +21,27 @@ window.addEventListener('message', (event) => {
 })
 
 contextBridge.exposeInMainWorld('bflayout', {
-  platform: process.platform
+  platform: process.platform,
+
+  /**
+   * Native menu commands, forwarded from main.
+   *
+   * The renderer owns all editor state, so the menu cannot act on its own: every
+   * item in `main/menu.ts` sends a command string here instead. Without this
+   * bridge the entire menu bar is inert, which is how it shipped — the type
+   * declaration in `renderer/env.d.ts` existed and both consumers guard with
+   * `if (!api?.onMenuCommand) return`, so nothing failed loudly and every
+   * accelerator, Cmd+S included, silently did nothing.
+   *
+   * The handler is wrapped rather than passed straight to ipcRenderer so the
+   * renderer never receives Electron's IpcRendererEvent, which would leak `sender`
+   * into the sandboxed page.
+   */
+  onMenuCommand: (handler: (command: string) => void): (() => void) => {
+    const listener = (_event: unknown, command: string): void => handler(command)
+    ipcRenderer.on('menu-command', listener)
+    return () => {
+      ipcRenderer.off('menu-command', listener)
+    }
+  }
 })
