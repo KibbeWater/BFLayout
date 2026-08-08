@@ -40,9 +40,26 @@ import {
   useDocuments,
   type DocumentTab
 } from '@renderer/editor/store/document'
-import { setPaneFields } from '@renderer/editor/commands'
+import {
+  composeCommands,
+  deletePane,
+  setPaneFields,
+  type Command
+} from '@renderer/editor/commands'
+
 import { usePlayback } from '@renderer/editor/store/playback'
 import { LayoutRenderer, type Camera } from './renderer'
+
+/**
+ * Arrow keys to a layout-space delta. Y is negated because layout space puts +Y
+ * upwards while the keys mean screen directions.
+ */
+const NUDGE_KEYS: Record<string, readonly [number, number]> = {
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+  ArrowUp: [0, 1],
+  ArrowDown: [0, -1]
+}
 
 interface DragState {
   readonly paneIds: string[]
@@ -107,19 +124,126 @@ export function LayoutCanvas(): ReactNode {
   const undo = useDocuments((state) => state.undo)
   const redo = useDocuments((state) => state.redo)
 
+  /**
+   * Moves every selected pane, as one undo entry.
+   *
+   * Y is inverted because layout space puts +Y upwards while the arrow keys mean
+   * screen directions.
+   */
+  const nudgeSelection = useCallback(
+    (paneIds: readonly string[], dx: number, dy: number): void => {
+      const state = useDocuments.getState()
+      const tab = state.tabs.find((entry) => entry.documentId === state.activeId)
+      if (!tab) return
+
+      const moves = paneIds
+        .map((id) => paneById(tab.document, id))
+        .filter((pane): pane is Pane => pane !== null)
+        .map((pane) => ({
+          id: pane.id,
+          before: [...pane.translate] as [number, number, number],
+          after: [pane.translate[0] + dx, pane.translate[1] + dy, pane.translate[2]] as [
+            number,
+            number,
+            number
+          ]
+        }))
+
+      if (moves.length === 0) return
+      state.runCommand(composeCommands(`Nudge ${moves.length} pane${moves.length === 1 ? '' : 's'}`,
+        moves.map((move) =>
+          setPaneFields(move.id, 'Nudge', { translate: move.before }, { translate: move.after })
+        )
+      ))
+    },
+    []
+  )
+
+  /** Deletes every selected pane, as one undo entry. */
+  const deleteSelection = useCallback((paneIds: readonly string[]): void => {
+    const state = useDocuments.getState()
+    const tab = state.tabs.find((entry) => entry.documentId === state.activeId)
+    if (!tab) return
+
+    /*
+     * Each command is applied as it is built, so the next one records an index
+     * that matches the array it will actually be inverted into. Creating them all
+     * against the starting document gives later siblings stale indices and undo
+     * puts them back in the wrong place. Re-applying in `runCommand` is harmless:
+     * a delete matches by identity and finds nothing the second time.
+     *
+     * The root has no parent to be removed from, so it is never deletable.
+     */
+    const commands: Command[] = []
+    for (const id of paneIds) {
+      if (id === tab.document.rootPane?.id) continue
+      const command = deletePane(tab.document, id)
+      if (!command) continue
+      command.apply(tab.document)
+      commands.push(command)
+    }
+
+    if (commands.length === 0) return
+    state.runCommand(
+      composeCommands(`Delete ${commands.length} pane${commands.length === 1 ? '' : 's'}`, commands)
+    )
+    state.select([])
+  }, [])
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null
-      // Let text inputs keep their own undo behaviour.
-      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
-      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'z') return
+      /*
+       * Keep out of anything the user is typing into. `isContentEditable` matters
+       * as much as the tag list: a contenteditable would otherwise swallow its own
+       * arrow keys and Backspace into pane nudges and deletions.
+       */
+      if (
+        target &&
+        (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable)
+      ) {
+        return
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault()
+        if (event.shiftKey) redo()
+        else undo()
+        return
+      }
+
+      const state = useDocuments.getState()
+      const tab = state.tabs.find((entry) => entry.documentId === state.activeId)
+      if (!tab) return
+      const selection = tab.selectedPaneIds
+
+      // Escape clears the selection, which is the only way back to "nothing
+      // selected" without clicking empty canvas.
+      if (event.key === 'Escape') {
+        if (selection.length === 0) return
+        event.preventDefault()
+        state.select([])
+        return
+      }
+
+      if (selection.length === 0) return
+
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        event.preventDefault()
+        deleteSelection(selection)
+        return
+      }
+
+      const nudge = NUDGE_KEYS[event.key]
+      if (!nudge) return
       event.preventDefault()
-      if (event.shiftKey) redo()
-      else undo()
+      // Shift nudges by ten, the convention in every editor of this kind.
+      const step = event.shiftKey ? 10 : 1
+      nudgeSelection(selection, nudge[0] * step, nudge[1] * step)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [undo, redo])
+  }, [undo, redo, deleteSelection, nudgeSelection])
 
   // Canvas commands from the native View menu. They live here because the state
   // they toggle does, and duplicating it in the menu would let the two drift.
@@ -524,21 +648,33 @@ export function LayoutCanvas(): ReactNode {
        * One undo entry per drag, recorded here rather than per pointer-move.
        * The document already holds the final position, so the command's apply()
        * is a no-op replay and only invert() does real work.
+       *
+       * Composed across the whole selection, not pushed per pane: dragging twenty
+       * marquee-selected panes used to cost twenty presses of Cmd+Z, and ten such
+       * drags would evict the rest of the history through the 200-entry cap.
        */
+      const moves: Command[] = []
+      let movedName = 'pane'
       for (const paneId of drag.paneIds) {
         const before = drag.origins.get(paneId)
         const pane = findById(tab.document.rootPane, paneId)
         if (!before || !pane) continue
         const moved = before[0] !== pane.translate[0] || before[1] !== pane.translate[1]
         if (!moved) continue
-        runCommand(
+        movedName = pane.name || 'pane'
+        moves.push(
           setPaneFields(
             paneId,
-            `Move ${pane.name || 'pane'}`,
+            `Move ${movedName}`,
             { translate: [before[0], before[1], pane.translate[2]] },
             { translate: [...pane.translate] as [number, number, number] }
           )
         )
+      }
+
+      if (moves.length === 1) runCommand(moves[0]!)
+      else if (moves.length > 1) {
+        runCommand(composeCommands(`Move ${moves.length} panes`, moves))
       }
     }
 

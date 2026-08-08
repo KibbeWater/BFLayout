@@ -16,6 +16,7 @@ import {
   openPurposeSchema,
   recentEntrySchema,
   recentKindSchema,
+  bymlDocumentSchema,
   folderListingSchema,
   textureListSchema,
   windowStateSchema,
@@ -226,6 +227,18 @@ export const animationContract = {
  * Listings are per-directory, so opening a 60,000-file dump costs one readdir
  * rather than a full walk.
  */
+/**
+ * Reading BYML configuration documents.
+ *
+ * Read-only: there is no BYML writer, so nothing here can save one back. Opening
+ * is stateless — the whole tree comes over in one call and main keeps nothing —
+ * because these documents are small (the largest in this game is 19,369 nodes),
+ * unlike layouts which stay open and editable.
+ */
+export const bymlContract = {
+  open: base.input(z.object({ path: z.string().min(1) })).output(bymlDocumentSchema)
+}
+
 export const folderContract = {
   list: base.input(z.object({ path: z.string().min(1) })).output(folderListingSchema),
   /** Recognises what a file is by sniffing it, decompressing first if needed. */
@@ -250,7 +263,8 @@ export const contract = {
   layout: layoutContract,
   textures: texturesContract,
   animation: animationContract,
-  folder: folderContract
+  folder: folderContract,
+  byml: bymlContract
 }
 
 export type Contract = typeof contract

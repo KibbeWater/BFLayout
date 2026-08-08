@@ -34,6 +34,7 @@ import { useWorkspace } from '@renderer/editor/store/workspace'
 import { ArchiveBrowser } from './panels/archive-browser'
 import { HierarchyPanel } from './panels/hierarchy'
 import { PropertiesPanel } from './panels/properties'
+import { BymlViewer } from './panels/byml-viewer'
 import { FolderBrowser } from './panels/folder-browser'
 import { MaterialsPanel } from './panels/materials'
 import { TexturePanel } from './panels/textures'
@@ -99,7 +100,7 @@ export function EditorScreen(): ReactNode {
         ) : null}
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <LayoutCanvas />
+          <MainView />
           {panels.showTimeline ? (
             <>
               <Splitter
@@ -264,6 +265,38 @@ function PanelToggles(): ReactNode {
  * vertical space and are rarely needed at the same moment, and tabs keep the
  * hierarchy tree — which is needed constantly — from being squeezed.
  */
+/**
+ * The canvas, or a BYML document when one is open.
+ *
+ * They share the space rather than sitting side by side because they answer the
+ * same question — "what am I looking at" — and a romfs holds far more
+ * configuration data than layouts.
+ */
+function MainView(): ReactNode {
+  const bymlPath = useFolder((state) => state.bymlPath)
+  const closeByml = useFolder((state) => state.closeByml)
+
+  if (!bymlPath) return <LayoutCanvas />
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center gap-2 border-b px-3 py-1.5">
+        <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+          BYML document
+        </span>
+        <button
+          type="button"
+          onClick={closeByml}
+          className="ml-auto rounded border px-2 py-0.5 text-[11px] hover:bg-accent"
+        >
+          Back to the canvas
+        </button>
+      </div>
+      <BymlViewer path={bymlPath} />
+    </div>
+  )
+}
+
 function BrowserPane(): ReactNode {
   // The active tab lives in the store so opening an archive from the file browser
   // can bring the Archive tab forward; see FolderStore.tab.

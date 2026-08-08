@@ -5,6 +5,7 @@ import { contract } from '@shared/contract'
 import { AnimationService } from '@main/services/animation'
 import { ArchiveService } from '@main/services/archive'
 import { DialogService } from '@main/services/dialog'
+import { BymlService } from '@main/services/byml'
 import { FolderService } from '@main/services/folder'
 import { LayoutService } from '@main/services/layout'
 import { RecentsService } from '@main/services/recents'
@@ -201,6 +202,12 @@ const animationRoutes = {
   })
 }
 
+const bymlRoutes = {
+  open: os.byml.open.handler(({ input }) =>
+    run(Effect.flatMap(BymlService, (s) => s.open(input.path)))
+  )
+}
+
 export const router = os.router({
   app: { settings, recents, windowState, workspace, setUnsavedCount: setUnsaved },
   dialog: dialogRoutes,
@@ -208,7 +215,8 @@ export const router = os.router({
   layout: layoutRoutes,
   textures: textureRoutes,
   animation: animationRoutes,
-  folder: folderRoutes
+  folder: folderRoutes,
+  byml: bymlRoutes
 })
 
 export type AppRouter = typeof router

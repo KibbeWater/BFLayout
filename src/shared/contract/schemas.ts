@@ -2,6 +2,7 @@ import * as z from 'zod'
 
 import type { AnimationDocument } from '@shared/formats/bflan/types'
 import type { LayoutDocument } from '@shared/formats/bflyt/types'
+import type { BymlDocumentView, BymlNodeView } from '@shared/formats/byml/view'
 
 /**
  * Editor settings. Every field carries a default, so `appSettingsSchema.parse({})`
@@ -228,6 +229,16 @@ export type DecodedTexture = z.infer<typeof decodedTextureSchema>
  * Like the layout document, passed through by type rather than field-validated:
  * the codec has already proven the shape and both ends share the type.
  */
+/**
+ * A parsed BYML document on its way to the viewer. Validated by the codec, so this
+ * is a passthrough for the same reason layoutDocumentSchema is.
+ */
+export const bymlDocumentSchema = z.custom<BymlDocumentView>(
+  (value) => typeof value === 'object' && value !== null
+)
+
+export type { BymlDocumentView, BymlNodeView }
+
 export const animationDocumentSchema = z.custom<AnimationDocument>(
   (value) => typeof value === 'object' && value !== null
 )

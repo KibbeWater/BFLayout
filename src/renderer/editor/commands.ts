@@ -180,6 +180,37 @@ export function setMaterialSnapshot(
   }
 }
 
+/**
+ * Bundles several commands into one undo entry.
+ *
+ * Anything that acts on a multi-pane selection needs this. Dragging twenty
+ * marquee-selected panes used to push twenty separate commands, so undoing the
+ * drag took twenty presses — and with a 200-entry cap, ten such drags silently
+ * evicted the rest of the session's history.
+ *
+ * Inversion runs in reverse order, which matters when the commands are not
+ * independent: deleting two siblings and then undoing must reinsert them in the
+ * opposite order for the recorded indices to line up.
+ *
+ * The caller must build each command against the state it will actually be applied
+ * to. `deletePane` records the index it found the pane at, so creating two
+ * deletions from the same starting document gives the second a stale index and
+ * undo restores it to the wrong slot. Create, apply, then create the next —
+ * re-applying a delete is a no-op because it matches by identity, so the composite
+ * is still safe to hand to `runCommand`.
+ */
+export function composeCommands(label: string, commands: readonly Command[]): Command {
+  return {
+    label,
+    apply: (document) => {
+      for (const command of commands) command.apply(document)
+    },
+    invert: (document) => {
+      for (let i = commands.length - 1; i >= 0; i--) commands[i]!.invert(document)
+    }
+  }
+}
+
 export interface UndoStack {
   readonly undo: Command[]
   readonly redo: Command[]

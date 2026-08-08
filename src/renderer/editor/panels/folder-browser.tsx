@@ -59,7 +59,14 @@ const KIND_ICON: Record<FolderEntryKind, ReactNode> = {
 }
 
 /** Kinds this editor can actually open, so the rest can be visibly inert. */
-const OPENABLE = new Set<FolderEntryKind>(['layout', 'layoutArchive', 'archive', 'directory'])
+const OPENABLE = new Set<FolderEntryKind>([
+  'layout',
+  'layoutArchive',
+  'archive',
+  'directory',
+  // BYML documents open in the read-only tree viewer.
+  'byml'
+])
 
 function formatSize(bytes: number): string {
   if (bytes === 0) return ''
@@ -379,6 +386,7 @@ function ListError({
 function FileRow({ entry, depth }: { entry: FolderEntry; depth: number }): ReactNode {
   const { openPath } = useOpenFile()
   const showArchive = useFolder((state) => state.showArchiveTab)
+  const openByml = useFolder((state) => state.openByml)
   const [busy, setBusy] = useState(false)
 
   const openable = OPENABLE.has(entry.kind)
@@ -410,6 +418,10 @@ function FileRow({ entry, depth }: { entry: FolderEntry; depth: number }): React
           }
           case 'layout':
             await openPath(entry.path, 'layout', newTab)
+            break
+          case 'byml':
+            // Takes over the main area; the canvas is a click away.
+            openByml(entry.path)
             break
           default:
             reportInfo(

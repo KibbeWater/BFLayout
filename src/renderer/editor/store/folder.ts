@@ -26,11 +26,21 @@ interface FolderStore {
    * opens into a tab you are not looking at, and the click appears to do nothing.
    */
   readonly tab: SidebarTab
+  /**
+   * The BYML document showing in the main area, or null for the canvas.
+   *
+   * A romfs is mostly configuration data rather than layouts, so browsing one
+   * means opening BYML far more often than BFLYT. It takes over the main area
+   * because these trees are wide and deep — the sidebar cannot show them usefully.
+   */
+  readonly bymlPath: string | null
   open: (path: string) => void
   navigate: (path: string) => void
   back: () => void
   close: () => void
   setTab: (tab: SidebarTab) => void
+  openByml: (path: string) => void
+  closeByml: () => void
   showArchiveTab: () => void
 }
 
@@ -39,6 +49,7 @@ export const useFolder = create<FolderStore>((set, get) => ({
   path: null,
   history: [],
   tab: 'archive',
+  bymlPath: null,
 
   open: (path) => set({ rootPath: path, path, history: [], tab: 'files' }),
 
@@ -58,6 +69,9 @@ export const useFolder = create<FolderStore>((set, get) => ({
   close: () => set({ rootPath: null, path: null, history: [] }),
 
   setTab: (tab) => set({ tab }),
+
+  openByml: (bymlPath) => set({ bymlPath }),
+  closeByml: () => set({ bymlPath: null }),
 
   showArchiveTab: () => set({ tab: 'archive' })
 }))

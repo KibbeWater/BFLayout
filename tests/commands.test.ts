@@ -8,6 +8,8 @@ import {
 } from '@shared/formats/bflyt/create'
 import type { LayoutDocument, TextPane } from '@shared/formats/bflyt'
 import {
+  composeCommands,
+  deletePane,
   setMaterialSnapshot,
   setPaneSnapshot,
   snapshotPane
@@ -166,5 +168,66 @@ describe('setMaterialSnapshot', () => {
     const document = createLayoutDocument()
     const command = setMaterialSnapshot(99, 'Edit', {}, {})
     expect(() => command.apply(document)).not.toThrow()
+  })
+})
+
+describe('composeCommands', () => {
+  it('applies in order and inverts in reverse', () => {
+    // Reverse inversion is the whole point: two deletions from one parent only
+    // restore to the right indices if the later one is reinserted first.
+    const first = createPicturePane('First')
+    const second = createPicturePane('Second')
+    const third = createPicturePane('Third')
+    const document = createLayoutDocument()
+    document.rootPane!.children.push(first, second, third)
+
+    // Built the way callers must: apply each before creating the next, so the
+    // recorded indices match the array each will be inverted into.
+    const commands = []
+    for (const target of [first, second]) {
+      const command = deletePane(document, target.id)
+      expect(command).not.toBeNull()
+      command!.apply(document)
+      commands.push(command!)
+    }
+
+    const composed = composeCommands('Delete 2 panes', commands)
+    expect(document.rootPane!.children.map((pane) => pane.name)).toEqual(['Third'])
+
+    // Re-applying is a no-op, which is what lets runCommand take the composite.
+    composed.apply(document)
+    expect(document.rootPane!.children.map((pane) => pane.name)).toEqual(['Third'])
+
+    composed.invert(document)
+    expect(document.rootPane!.children.map((pane) => pane.name)).toEqual([
+      'First',
+      'Second',
+      'Third'
+    ])
+  })
+
+  it('is a single entry however many panes it moves', () => {
+    const panes = ['A', 'B', 'C'].map((name) => createPicturePane(name))
+    const document = createLayoutDocument()
+    document.rootPane!.children.push(...panes)
+
+    const moves = panes.map((pane) => {
+      const before = snapshotPane(pane)
+      pane.translate[0] = 40
+      return setPaneSnapshot(pane.id, 'Nudge', before, snapshotPane(pane))
+    })
+
+    const composed = composeCommands('Nudge 3 panes', moves)
+    composed.invert(document)
+    expect(document.rootPane!.children.map((pane) => pane.translate[0])).toEqual([0, 0, 0])
+    composed.apply(document)
+    expect(document.rootPane!.children.map((pane) => pane.translate[0])).toEqual([40, 40, 40])
+  })
+
+  it('does nothing for an empty list rather than failing', () => {
+    const document = createLayoutDocument()
+    const composed = composeCommands('Nothing', [])
+    expect(() => composed.apply(document)).not.toThrow()
+    expect(() => composed.invert(document)).not.toThrow()
   })
 })

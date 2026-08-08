@@ -6,6 +6,7 @@ import { ArchiveService } from './services/archive'
 import { CompressionService } from './services/compression'
 import { DialogService } from './services/dialog'
 import { FilesService } from './services/files'
+import { BymlService } from './services/byml'
 import { FolderService } from './services/folder'
 import { LayoutService } from './services/layout'
 import { PathsLive } from './services/paths-live'
@@ -29,7 +30,8 @@ export const AppLayer = Layer.mergeAll(
   TextureService.Default,
   AnimationService.Default,
   WorkspaceService.Default,
-  FolderService.Default
+  FolderService.Default,
+  BymlService.Default
 ).pipe(
   Layer.provideMerge(ArchiveService.Default),
   Layer.provideMerge(Layer.mergeAll(FilesService.Default, CompressionService.Default)),

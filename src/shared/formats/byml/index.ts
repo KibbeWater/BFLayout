@@ -17,3 +17,11 @@ export {
 } from './types'
 
 export { isByml, parseByml } from './codec'
+
+export type { BymlDocumentView, BymlNodeView } from './view'
+export {
+  formatScalar,
+  isViewContainer,
+  toBymlView,
+  viewChildCount
+} from './view'

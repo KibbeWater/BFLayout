@@ -566,7 +566,24 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       const count = (p) => 1 + p.children.reduce((n, k) => n + count(k), 0)
       const tex = await c.textures.list({ source: doc.source })
       const anims = await c.animation.list({ source: doc.source })
+
+      // BYML is what a romfs is mostly made of, so read one end to end. Walk the
+      // top level for any directory holding one rather than naming a path, which
+      // would only work for this game.
+      let bymlNodes = -1
+      let bymlVersion = -1
+      for (const dir of top.entries.filter(e => e.kind === 'directory').slice(0, 40)) {
+        const listing = await c.folder.list({ path: dir.path })
+        const candidate = listing.entries.find(e => e.kind === 'byml')
+        if (!candidate) continue
+        const parsed = await c.byml.open({ path: candidate.path })
+        bymlNodes = parsed.nodeCount
+        bymlVersion = parsed.version
+        break
+      }
       romfsResult = JSON.stringify({
+        bymlNodes,
+        bymlVersion,
         topEntries: top.entries.length,
         layoutFiles: inner.entries.length,
         name: first.name,
@@ -703,6 +720,10 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     check(false, `romfs browsing: ${romfs}`)
   } else {
     const r = JSON.parse(romfs) as Record<string, number | string>
+    check(
+      Number(r['bymlNodes']) > 0,
+      `read a BYML document from the dump (v${r['bymlVersion']}, ${r['bymlNodes']} nodes)`
+    )
     check(Number(r['topEntries']) > 0, `romfs root listed ${r['topEntries']} entries`)
     check(Number(r['layoutFiles']) > 0, `Layout/ listed ${r['layoutFiles']} files`)
     check(r['format'] === 'SARC', `sniffed ${r['name']} as ${r['format']} (${r['compression']})`)
@@ -921,6 +942,9 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
    * close handler is synchronous and cannot ask at the last moment. Before this
    * existed, Cmd+W discarded every unsaved layout without a word.
    */
+  // Relative to whatever is already open: earlier checks leave tabs behind, and
+  // with a romfs pointed at there is more than one.
+  const unsavedBefore = getUnsavedCount()
   await win.webContents.executeJavaScript(`(async () => {
     // mutate's recipe receives the tab, not the document.
     window.__bfdev.documents.getState().mutate((tab) => {
@@ -928,13 +952,20 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     })
     await new Promise(r => setTimeout(r, 300))
   })()`)
-  check(getUnsavedCount() > 0, `main learned about unsaved work (${getUnsavedCount()} tab(s))`)
+  const unsavedAfterEdit = getUnsavedCount()
+  check(
+    unsavedAfterEdit > unsavedBefore,
+    `main learned about unsaved work (${unsavedBefore} -> ${unsavedAfterEdit})`
+  )
 
   await win.webContents.executeJavaScript(`(async () => {
     window.__bfdev.documents.getState().markSaved()
     await new Promise(r => setTimeout(r, 300))
   })()`)
-  check(getUnsavedCount() === 0, 'main learned the work was saved')
+  check(
+    getUnsavedCount() === unsavedBefore,
+    `main learned the work was saved (back to ${getUnsavedCount()})`
+  )
 
   // Fit and deselect before the capture, so the screenshot shows the layout rather
   // than whatever corner the camera happened to be in.
