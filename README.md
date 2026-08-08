@@ -42,12 +42,13 @@ romfs dump (Switch, v1.0.4) is parsed and rewritten byte for byte:
 | | files | byte-exact |
 | --- | --- | --- |
 | SARC archives | 567 | 100% |
-| BFLYT layouts | 544 | 99.3% |
+| BFLYT layouts | 544 | **100%** |
 | BFLAN animations | 2187 | **100%** |
 | BNTX containers | 74,571 textures decoded | 100% |
 
-See [Validating against real files](#validating-against-real-files) for how to run
-this, and what the remaining four layouts are.
+Every file, byte for byte. See [Validating against real
+files](#validating-against-real-files) for how to run it, and for the two format
+details that measurement caught and reading would not have.
 
 ### Keyboard
 

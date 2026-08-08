@@ -410,6 +410,30 @@ export function readPane(
             ? [...reader.bytesAt(sectionStart + entry.panelInfoOffset, 52)]
             : null
 
+        /*
+         * The middle offset points at a `usd1` section, at every version.
+         *
+         * It was treated as an opaque value from version 8 and written back unchanged,
+         * so the offset survived but the block it named did not — which is precisely the
+         * shortfall in the four layouts that would not round-trip. Read like the override
+         * above: take the size from the section's own header rather than inferring it.
+         *
+         * A value that does not resolve to a section within bounds is left alone and kept
+         * as `unknown`, so if this really is an opaque field in some other build, nothing
+         * is lost and nothing is misread.
+         */
+        let userDataBytes: number[] | null = null
+        if (entry.secondOffset > 0) {
+          const at = sectionStart + entry.secondOffset
+          if (at + 8 <= sectionEnd) {
+            const signature = reader.at(at, () => reader.fixedString(4))
+            const size = reader.at(at + 4, () => reader.u32())
+            if (signature === 'usd1' && size >= 8 && at + size <= sectionEnd) {
+              userDataBytes = [...reader.bytesAt(at, size)]
+            }
+          }
+        }
+
         return {
           name: entry.name,
           usageFlag: entry.usageFlag,
@@ -417,7 +441,7 @@ export function readPane(
           materialUsageFlag: entry.materialUsageFlag,
           overrideSection,
           panelInfo,
-          userDataBytes: null,
+          userDataBytes,
           unknown: entry.secondOffset
         }
       })
@@ -589,9 +613,18 @@ export function writePane(writer: BinaryWriter, pane: Pane, major: number): void
         writer.u8(property.materialUsageFlag)
         writer.zeros(1)
         const propertyPatch = writer.defer('u32')
-        // From version 8 this slot is an opaque value, not a pointer.
-        if (major >= 8) writer.u32(property.unknown)
-        const userDataPatch = major >= 8 ? null : writer.defer('u32')
+        /*
+         * The user-data offset, at every version. This used to write `unknown` straight
+         * back for version 8 and up on the belief that the slot had become an opaque
+         * value; it is a pointer, and replaying it without emitting the block left it
+         * dangling and the section short.
+         *
+         * When there is no block to place, the original value goes back verbatim — that
+         * covers both a genuine zero and whatever a build this one does not know about
+         * might put there.
+         */
+        const userDataPatch = property.userDataBytes ? writer.defer('u32') : null
+        if (!userDataPatch) writer.u32(property.unknown)
         const panelInfoPatch = writer.defer('u32')
         return { property, propertyPatch, userDataPatch, panelInfoPatch }
       })
@@ -608,14 +641,10 @@ export function writePane(writer: BinaryWriter, pane: Pane, major: number): void
           entry.propertyPatch.set(0)
         }
 
-        if (entry.userDataPatch) {
-          if (entry.property.userDataBytes && entry.property.userDataBytes.length > 0) {
-            entry.userDataPatch.fillFrom(start)
-            writer.bytes(new Uint8Array(entry.property.userDataBytes))
-            writer.align(4)
-          } else {
-            entry.userDataPatch.set(0)
-          }
+        if (entry.userDataPatch && entry.property.userDataBytes) {
+          entry.userDataPatch.fillFrom(start)
+          writer.bytes(new Uint8Array(entry.property.userDataBytes))
+          writer.align(4)
         }
 
         if (entry.property.panelInfo && entry.property.panelInfo.length > 0) {

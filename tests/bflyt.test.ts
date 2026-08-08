@@ -6,6 +6,7 @@ import {
   createGroup,
   createLayoutDocument,
   createMaterial,
+  createPartPane,
   createPicturePane,
   createTextPane,
   createWindowPane
@@ -19,6 +20,7 @@ import {
   writeBflyt,
   walkPanes,
   type LayoutDocument,
+  type PartPane,
   type PicturePane,
   type TextPane,
   type WindowPane
@@ -325,6 +327,82 @@ describe('BFLYT byte fidelity', () => {
     const parsed = parseBflyt(spliced)
     expect(parsed.document.unknownSections.map((s) => s.signature)).toEqual(['xxx1'])
     expect([...writeBflyt(parsed.document, parsed.sources)]).toEqual([...spliced])
+  })
+})
+
+describe('part panes', () => {
+  /**
+   * Each of a part's properties can carry its own `usd1` section, reached through the
+   * middle of its three offsets.
+   *
+   * That slot was documented as becoming an opaque value at version 8 and was written
+   * straight back, so the offset survived a save while the block it named did not — the
+   * pointer dangled and the section came back short by exactly the block's size. It was
+   * the last thing keeping four shipped layouts from round-tripping, and every one of
+   * them declares a single entry called `PartsVariationFrame`.
+   */
+  const partsVariationFrame = (): number[] => [
+    // A minimal real usd1: signature, size, one entry, then the entry's name.
+    0x75, 0x73, 0x64, 0x31, 0x30, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
+    0x00, 0x0c, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x50, 0x61,
+    0x72, 0x74, 0x73, 0x56, 0x61, 0x72, 0x69, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x46, 0x72, 0x61,
+    0x6d, 0x65, 0x00
+  ]
+
+  const documentWithProperty = (userDataBytes: number[] | null): LayoutDocument => {
+    const document = createLayoutDocument({ name: 'Parts', width: 1280, height: 720 })
+    const part = createPartPane('L_UgcList_00', 'UGCEditor_UGCList_00')
+    part.properties = [
+      {
+        name: 'L_BtnList00_00',
+        usageFlag: 0,
+        basicUsageFlag: 0,
+        materialUsageFlag: 0,
+        overrideSection: null,
+        panelInfo: null,
+        userDataBytes,
+        unknown: 0
+      }
+    ]
+    document.rootPane!.children.push(part)
+    return document
+  }
+
+  const firstPart = (document: LayoutDocument): PartPane => {
+    let found: PartPane | null = null
+    walkPanes(document.rootPane, (pane) => {
+      if (pane.kind === 'prt1' && !found) found = pane
+    })
+    if (!found) throw new Error('no part pane in the document')
+    return found
+  }
+
+  it('round-trips a property user-data block', () => {
+    const bytes = writeBflyt(documentWithProperty(partsVariationFrame()))
+    const property = firstPart(parseBflyt(bytes).document).properties[0]!
+    expect(property.userDataBytes).toEqual(partsVariationFrame())
+  })
+
+  it('re-encodes to identical bytes, so the offset cannot dangle', () => {
+    const once = writeBflyt(documentWithProperty(partsVariationFrame()))
+    const twice = writeBflyt(parseBflyt(once).document)
+    expect([...twice]).toEqual([...once])
+  })
+
+  it('accounts for the whole block in the section size', () => {
+    // The failure this guards was a section short by exactly the block's length.
+    const without = writeBflyt(documentWithProperty(null))
+    const withBlock = writeBflyt(documentWithProperty(partsVariationFrame()))
+    expect(withBlock.length - without.length).toBe(partsVariationFrame().length)
+  })
+
+  it('keeps a middle offset that does not name a section', () => {
+    // If some other build really does put an opaque value there, it must survive.
+    const document = documentWithProperty(null)
+    firstPart(document).properties[0]!.unknown = 0x1234
+    const property = firstPart(parseBflyt(writeBflyt(document)).document).properties[0]!
+    expect(property.unknown).toBe(0x1234)
+    expect(property.userDataBytes).toBeNull()
   })
 })
 

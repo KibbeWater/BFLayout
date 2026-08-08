@@ -358,8 +358,21 @@ export interface PartProperty {
   overrideSection: number[] | null
   /** 52-byte block, uninterpreted. */
   panelInfo: number[] | null
+  /**
+   * A `usd1` section attached to this property, kept verbatim.
+   *
+   * The middle offset of the three was documented as becoming an opaque value at version
+   * 8 and was written straight back, which left it pointing at a block that was never
+   * emitted. Every shipped part that used it — four layouts, the last four in the dump
+   * that did not round-trip — came back short by exactly the total size of these blocks.
+   * They all declare one entry named `PartsVariationFrame`.
+   */
   userDataBytes: number[] | null
-  /** Replaces the user-data offset from version 8. */
+  /**
+   * The middle offset's raw value, kept for the case where it is *not* a readable
+   * section. Nothing here interprets it, and writing it back verbatim is the only way a
+   * value this build does not understand survives a save.
+   */
   unknown: number
 }
 
