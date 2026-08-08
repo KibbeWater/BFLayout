@@ -43,5 +43,21 @@ contextBridge.exposeInMainWorld('bflayout', {
     return () => {
       ipcRenderer.off('menu-command', listener)
     }
-  }
+  },
+
+  /**
+   * Undo or redo inside whatever text field currently has focus.
+   *
+   * A native menu accelerator consumes the keystroke before the page sees it, so `Cmd+Z`
+   * never reaches a focused input. The Edit menu's Undo is not a `role: 'undo'` item — it
+   * has to reach the *document* history most of the time — which left a gap: once the
+   * renderer correctly declined to undo the document while the caret sat in a field, nothing
+   * performed the field's undo either, and Cmd+Z did nothing at all.
+   *
+   * `webContents.undo()` is the API for exactly this, and it lives in main, so the renderer
+   * asks for it. Cut, copy and paste avoid the whole problem by using native roles; undo
+   * cannot, because its meaning depends on focus.
+   */
+  editUndo: (): void => ipcRenderer.send('edit-undo'),
+  editRedo: (): void => ipcRenderer.send('edit-redo')
 })

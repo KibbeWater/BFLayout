@@ -495,7 +495,7 @@ export function LayoutCanvas(): ReactNode {
     const onCommand = (event: Event): void => {
       switch ((event as CustomEvent<string>).detail) {
         case 'toggle-grid':
-          setShowGrid(!showGrid)
+          toggleGrid()
           break
         case 'toggle-textures':
           setShowTextures((value) => !value)
@@ -561,10 +561,38 @@ export function LayoutCanvas(): ReactNode {
    */
   const showGrid = settings.data?.showGrid ?? true
   const snap = settings.data?.snapToGuides ?? true
-  const setShowGrid = (next: boolean): void => {
+
+  /*
+   * The intended values, tracked in refs alongside the query.
+   *
+   * Two problems that both come from these living in settings rather than in component
+   * state, and both are invisible until you use the menu:
+   *
+   *   - The View menu handler is registered once at mount with no deps, so a plain
+   *     `!showGrid` captured the *first* render's value — and on the first render
+   *     `settings.data` is still undefined, so the closure read `true` forever and Toggle
+   *     Grid could only ever turn the grid off. The toolbar button got a fresh closure each
+   *     render and still worked, which made it look intermittent.
+   *   - `patch` only changes what the query reports after the mutation lands and the query
+   *     refetches, so two quick clicks both read the same stale value and land on the same
+   *     state — a lost update the functional updater this replaced could not have.
+   *
+   * A ref updated at the moment of the click fixes both: it is always current, and it does
+   * not wait for a round trip.
+   */
+  const showGridRef = useRef(showGrid)
+  const snapRef = useRef(snap)
+  showGridRef.current = showGrid
+  snapRef.current = snap
+
+  const toggleGrid = (): void => {
+    const next = !showGridRef.current
+    showGridRef.current = next
     patchSettings.mutate({ showGrid: next })
   }
-  const setSnap = (next: boolean): void => {
+  const toggleSnap = (): void => {
+    const next = !snapRef.current
+    snapRef.current = next
     patchSettings.mutate({ snapToGuides: next })
   }
 
@@ -1198,7 +1226,7 @@ export function LayoutCanvas(): ReactNode {
       <div className="flex shrink-0 items-center gap-2 border-b px-2 py-1">
         <button
           type="button"
-          onClick={() => setShowGrid(!showGrid)}
+          onClick={toggleGrid}
           className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-accent ${
             showGrid ? 'text-foreground' : 'text-muted-foreground/60'
           }`}
@@ -1220,7 +1248,7 @@ export function LayoutCanvas(): ReactNode {
         </button>
         <button
           type="button"
-          onClick={() => setSnap(!snap)}
+          onClick={toggleSnap}
           className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-accent ${
             snap ? 'text-foreground' : 'text-muted-foreground/60'
           }`}

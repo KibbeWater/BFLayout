@@ -141,6 +141,46 @@ describe('autosave plan', () => {
     ).toEqual([MENU])
   })
 
+  it('does not starve one of two dirty tabs on the same file', () => {
+    /*
+     * One row per file means one tab's document, and there is no clock to choose by:
+     * `revision` counts edits, so "highest revision" is "most edits ever", not "edited most
+     * recently". A tab with thirty old edits used to win over one with three fresh ones on
+     * every flush, so the fresh tab's work was never protected at all.
+     */
+    const memory = newAutosaveMemory()
+    const veteran = tab({ documentId: 'veteran', revision: 30 })
+    const newcomer = tab({ documentId: 'newcomer', revision: 3 })
+
+    const written = new Set<string>()
+    for (let round = 0; round < 4; round++) {
+      const plan = planAutosave([veteran, newcomer], memory)
+      for (const entry of plan.put) written.add(entry.documentId)
+    }
+
+    // Both get a turn rather than one holding the row forever.
+    expect(written.has('veteran')).toBe(true)
+    expect(written.has('newcomer')).toBe(true)
+  })
+
+  it('does not mistake one tab for another when their edit counters coincide', () => {
+    // `revision` is per tab and starts at zero, so two tabs reach the same number routinely.
+    // Comparing the number alone skipped the second tab's different document as written.
+    const memory = newAutosaveMemory()
+    planAutosave([tab({ documentId: 'first', revision: 5 })], memory)
+    const plan = planAutosave([tab({ documentId: 'second', revision: 5 })], memory)
+    expect(plan.put.map((entry) => entry.documentId)).toEqual(['second'])
+  })
+
+  it('reschedules when a second dirty tab on one file changes', () => {
+    // A max over revisions meant the second tab could not move the mark, so its edits never
+    // scheduled a flush.
+    const seen = new Map<string, number>()
+    const a = tab({ documentId: 'a', revision: 10 })
+    shouldReschedule([a, tab({ documentId: 'b', revision: 1 })], seen)
+    expect(shouldReschedule([a, tab({ documentId: 'b', revision: 2 })], seen)).toBe(true)
+  })
+
   it('names a tab with no key instead of sending an invalid request', () => {
     const plan = planAutosave([tab({ snapshotKey: '' })], newAutosaveMemory())
     expect(plan.unkeyed).toEqual(['Menu.bflyt'])

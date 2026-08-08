@@ -1,4 +1,6 @@
-import { readFile, writeFile } from 'node:fs/promises'
+import { copyFile, readFile, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { inflateSync } from 'node:zlib'
 import { app, nativeImage, type BrowserWindow } from 'electron'
 
@@ -1041,6 +1043,75 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     back?: number[]
     original?: number[]
     restored?: boolean
+  }
+
+  /*
+   * Sessions that nothing refers to get released.
+   *
+   * `archive.close` and `animation.close` were implemented and called by nothing. For
+   * animations that is a plain leak — clicking through a folder of them retained a parsed
+   * document each time. For archives it is worse than a leak: resolving a texture searches
+   * every open archive, so an archive nobody refers to keeps making lookups slower and keeps
+   * being able to answer with a same-named texture from a file whose tab was closed long ago.
+   */
+  // A copy under a second path, so the reconciler has something to close that no tab,
+  // no browser view and no animation refers to.
+  const spareArchive = join(tmpdir(), 'bflayout-selftest-spare.szs')
+  const spareReady = await copyFile(process.env['BFLAYOUT_SELFTEST_ARCHIVE'] ?? '', spareArchive)
+    .then(() => true)
+    .catch(() => false)
+
+  const sessions2 = spareReady
+    ? ((await win.webContents.executeJavaScript(`(async () => {
+    const c = window.__bfclient
+    const dev = window.__bfdev
+
+    /*
+     * A *different path*, because openPath dedupes on path: opening the fixture again
+     * returned the very archive the open tab refers to, so the check could never observe a
+     * close and passed nothing.
+     */
+    const spare = await c.archive.open({ path: ${JSON.stringify(join(tmpdir(), 'bflayout-selftest-spare.szs'))} })
+    const before = (await c.archive.list()).length
+
+    // Nudge the stores so the reconciler runs, then wait past its settle delay.
+    dev.documents.getState().setActive(dev.documents.getState().activeId)
+    await new Promise(r => setTimeout(r, 3500))
+
+    const after = await c.archive.list()
+    const stillOpen = after.map(a => a.archiveId)
+    const tabIds = dev.documents.getState().tabs
+      .filter(t => t.source.kind === 'archive')
+      .map(t => t.source.archiveId)
+
+    return {
+      before,
+      after: after.length,
+      spareClosed: !stillOpen.includes(spare.archiveId),
+      // The archive behind an open tab must never be dropped.
+      tabsKept: tabIds.every(id => stillOpen.includes(id)),
+      tabs: tabIds.length
+    }
+  })()`)) as {
+        before?: number
+        after?: number
+        spareClosed?: boolean
+        tabsKept?: boolean
+        tabs?: number
+      })
+    : null
+
+  if (!sessions2) {
+    out.push('SKIP archive session reconciliation (no fixture archive to copy)')
+  } else {
+    check(
+      sessions2.spareClosed === true,
+      `an archive nothing refers to is released (${sessions2.before} -> ${sessions2.after} open)`
+    )
+    check(
+      sessions2.tabsKept === true,
+      `archives behind open tabs are kept (${sessions2.tabs} tab(s))`
+    )
   }
 
   /*

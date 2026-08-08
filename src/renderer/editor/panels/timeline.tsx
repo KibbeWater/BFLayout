@@ -140,6 +140,9 @@ function AnimationRow({
   const openIt = (): void => {
     setLoading(true)
     void (async () => {
+      // Whatever was loaded is about to be replaced, so its main-process session goes with
+      // it. Read before the await, because the store moves once the new one lands.
+      const previous = usePlayback.getState().animationId
       try {
         const opened = await getClient().animation.open({ source, key: candidate.key })
         load({
@@ -148,6 +151,20 @@ function AnimationRow({
           document: opened.document,
           source: opened.source
         })
+
+        /*
+         * Released only after the new one is loaded, and never if it is the same session.
+         * Clicking through a folder of animations to find the right one is the ordinary way
+         * to use this panel, and each click used to retain a parsed document in main for the
+         * rest of the session.
+         */
+        if (previous && previous !== opened.animationId) {
+          void getClient()
+            .animation.close({ animationId: previous })
+            .catch((detail: unknown) =>
+              console.warn('[bflayout] could not release an animation:', detail)
+            )
+        }
       } catch (cause) {
         reportError(cause, { retry: openIt })
       } finally {
@@ -272,7 +289,18 @@ function Transport(): ReactNode {
       </span>
       <button
         type="button"
-        onClick={unload}
+        onClick={() => {
+          // The session goes with it: closing here is the user saying they are done.
+          const previous = usePlayback.getState().animationId
+          unload()
+          if (previous) {
+            void getClient()
+              .animation.close({ animationId: previous })
+              .catch((detail: unknown) =>
+                console.warn('[bflayout] could not release an animation:', detail)
+              )
+          }
+        }}
         title="Close the animation and restore authored values"
         className="rounded p-1 hover:bg-accent"
       >

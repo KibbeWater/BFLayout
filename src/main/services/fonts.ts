@@ -60,15 +60,20 @@ export class FontService extends Effect.Service<FontService>()('FontService', {
     /** Directories to search for a font archive, nearest first. */
     const searchRoots = (source: LayoutSource): Effect.Effect<string[], never> =>
       Effect.gen(function* () {
-        const start =
+        /*
+         * The archive's path is checked *before* dirname, not after: `dirname('')` is `'.'`,
+         * which is truthy, so the guard never fired and a closed archive sent the walk up
+         * from the main process's working directory instead of bailing.
+         */
+        const origin =
           source.kind === 'file'
-            ? dirname(source.path)
-            : dirname(yield* Effect.orElseSucceed(
+            ? source.path
+            : yield* Effect.orElseSucceed(
                 Effect.map(archives.describeOne(source.archiveId), (found) => found.path),
                 () => ''
-              ))
-
-        if (!start) return []
+              )
+        if (!origin) return []
+        const start = dirname(origin)
 
         const roots: string[] = []
         let at = start
@@ -167,12 +172,26 @@ export class FontService extends Effect.Service<FontService>()('FontService', {
      * extensions which may or may not match what is shipped. Matching on the stem is what
      * bridges both, and it is why this cannot just be a map lookup.
      */
-    const find = (archive: FontArchive, name: string): Uint8Array | null => {
+    const find = (
+      archive: FontArchive,
+      name: string,
+      accept?: (bytes: Uint8Array) => boolean
+    ): Uint8Array | null => {
       const wanted = stem(name)
       const direct = archive.entries.get(name.toLowerCase())
-      if (direct) return direct
+      if (direct && (!accept || accept(direct))) return direct
+
+      /*
+       * Keeps scanning past a stem match of the wrong kind.
+       *
+       * Returning the first match meant an archive holding both `System_00.bfttf` and
+       * `fcpx/System_00.bfcpx` could answer a descriptor lookup with the typeface — whichever
+       * came first in entry order — and the caller would then reject it and report the whole
+       * chain missing, even though the descriptor was sitting there further along.
+       */
       for (const [key, value] of archive.entries) {
-        if (stem(key) === wanted) return value
+        if (stem(key) !== wanted) continue
+        if (!accept || accept(value)) return value
       }
       return null
     }
@@ -199,8 +218,8 @@ export class FontService extends Effect.Service<FontService>()('FontService', {
           )
         }
 
-        const descriptor = find(archive, name)
-        if (!descriptor || !isBfcpx(descriptor)) {
+        const descriptor = find(archive, name, isBfcpx)
+        if (!descriptor) {
           return yield* Effect.fail(
             new NotFoundError({ kind: 'font complex', id: `${name} in ${archive.path}` })
           )
@@ -214,8 +233,8 @@ export class FontService extends Effect.Service<FontService>()('FontService', {
         const faces: FontChain['faces'] = []
         const missing: string[] = []
         for (const face of wanted) {
-          const bytes = find(archive, face)
-          if (!bytes || !isBfttf(bytes)) {
+          const bytes = find(archive, face, isBfttf)
+          if (!bytes) {
             missing.push(face)
             continue
           }

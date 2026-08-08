@@ -370,11 +370,18 @@ Three things that all looked fine and were not:
 - **`Cmd+Z` while typing** used to undo the last *canvas* edit instead of the typing. The
   canvas key handler has always declined when focus is in a field, but the native menu
   forwards `Cmd+Z` as a command with no target at all, so it went straight to the document.
-  Both now ask the same question (`lib/typing-target.ts`), and the browser's own undo takes
-  the field — the same reasoning the Edit menu already used in giving cut/copy/paste native
-  roles. The end-to-end pass sends the real IPC and asserts both halves: nothing happens
-  with the caret in a field, and exactly one entry is undone with focus on the canvas, which
-  also rules out the accelerator and the keydown both firing.
+  Both now ask the same question (`lib/typing-target.ts`).
+
+  Declining is only half of it, and the first attempt got this wrong. A menu accelerator
+  consumes the keystroke before the page sees it — that is *why* the field never got its own
+  undo — so simply not undoing the document left `Cmd+Z` doing nothing at all in a field:
+  quieter than the original bug, still wrong, and the comment claiming "the browser's own
+  undo takes the field" described something the code could not do. Undo cannot be a native
+  `role` item the way cut/copy/paste are, because its meaning depends on focus, so the
+  renderer asks main for `webContents.undo()` instead. The end-to-end pass asserts both
+  halves: the document is untouched with the caret in a field, and exactly one entry is
+  undone with focus on the canvas — which also rules out the accelerator and the keydown
+  both firing.
 - **`Cmd+O` did nothing on the welcome screen** — the one screen whose entire purpose is
   opening a file. The handler lived on the editor route, which is not mounted there. Open
   and open-folder now sit in the always-mounted shell beside `save-all`, which had already

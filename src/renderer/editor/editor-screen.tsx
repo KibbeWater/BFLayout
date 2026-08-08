@@ -161,8 +161,8 @@ export function EditorScreen(): ReactNode {
  */
 function useMenuCommands(): void {
   const panels = usePanels()
-  const { openViaDialog, openFolderViaDialog } = useOpenFile()
-  // `save-all` is handled in AppShell, which is mounted on every route.
+  // `save-all`, `open-file` and `open-folder` are handled in AppShell, which is mounted on
+  // every route; handling them here as well produced two dialogs for one Cmd+O.
   const { save, saveAs } = useSave()
   const undo = useDocuments((state) => state.undo)
   const redo = useDocuments((state) => state.redo)
@@ -173,12 +173,16 @@ function useMenuCommands(): void {
 
     return api.onMenuCommand((command) => {
       switch (command) {
-        case 'open-file':
-          openViaDialog()
-          break
-        case 'open-folder':
-          openFolderViaDialog()
-          break
+        /*
+         * `open-file` and `open-folder` are handled by the shell, not here.
+         *
+         * The preload registers listeners with `ipcRenderer.on`, which is multi-listener, so
+         * with both mounted one Cmd+O produced two `dialog.openFiles` calls and two native
+         * dialogs — pick a file, it opens, and a second dialog appears unprompted. Nothing
+         * dedupes them: `openViaDialog` sets a busy flag it never checks, and the main-side
+         * dialog opens unconditionally. The shell is the right owner because it is mounted on
+         * every route, including the welcome screen where Cmd+O matters most.
+         */
         case 'save':
           save()
           break
@@ -195,11 +199,21 @@ function useMenuCommands(): void {
          * The browser's own undo handles the field, so declining here is all that is
          * needed; the cut/copy/paste items already use native roles for the same reason.
          */
+        /*
+         * Undo and redo mean different things depending on where the caret is, and a menu
+         * accelerator carries no target — so the focused element decides. With focus in a
+         * text field the *field* is undone, through main, because the accelerator swallowed
+         * the keystroke before the page could handle it natively; anything else undoes the
+         * document. Declining without the fallback made Cmd+Z do nothing at all in a field,
+         * which is quieter than the original bug but still wrong.
+         */
         case 'undo':
-          if (!isTypingFocused()) undo()
+          if (isTypingFocused()) window.bflayout?.editUndo?.()
+          else undo()
           break
         case 'redo':
-          if (!isTypingFocused()) redo()
+          if (isTypingFocused()) window.bflayout?.editRedo?.()
+          else redo()
           break
         case 'toggle-sidebar':
           panels.toggle('showSidebar')
@@ -225,7 +239,7 @@ function useMenuCommands(): void {
           break
       }
     })
-  }, [panels, openViaDialog, openFolderViaDialog, save, saveAs, undo, redo])
+  }, [panels, save, saveAs, undo, redo])
 }
 
 const PANEL_KEYS: readonly PanelKey[] = [

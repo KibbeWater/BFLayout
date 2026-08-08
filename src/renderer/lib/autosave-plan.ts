@@ -27,8 +27,15 @@ export interface AutosaveTab {
 
 /** Carried between runs; mutated in place so the caller keeps no bookkeeping of its own. */
 export interface AutosaveMemory {
-  /** Revision last written per key, or -1 once discarded, so nothing is re-serialised. */
-  readonly written: Map<string, number>
+  /**
+   * What was last written per key: the document id *and* revision, or null once discarded.
+   *
+   * The id matters. `revision` is a per-tab edit counter starting at zero, not a clock, so
+   * comparing it across tabs aliases: two tabs on one file whose counters happen to reach the
+   * same number looked like "already written" and the second tab's different document was
+   * skipped.
+   */
+  readonly written: Map<string, { documentId: string; revision: number } | null>
   /** Keys seen holding unsaved edits at any point this session. */
   readonly everDirty: Set<string>
 }
@@ -77,22 +84,22 @@ export function planAutosave(
   }
 
   for (const [key, group] of byKey) {
-    // The most recently edited unsaved tab is the one whose work is worth keeping.
-    const dirty = group
-      .filter((tab) => tab.unsaved)
-      .sort((a, b) => b.revision - a.revision)[0]
+    const dirty = pickDirty(group, memory.written.get(key) ?? null)
 
     if (dirty) {
       memory.everDirty.add(key)
-      if (memory.written.get(key) === dirty.revision) continue
-      memory.written.set(key, dirty.revision)
+      const last = memory.written.get(key)
+      if (last && last.documentId === dirty.documentId && last.revision === dirty.revision) {
+        continue
+      }
+      memory.written.set(key, { documentId: dirty.documentId, revision: dirty.revision })
       put.push({ key, documentId: dirty.documentId, displayName: dirty.displayName })
       continue
     }
 
     // No tab on this file has unsaved work: the file on disk is the better copy.
-    if (memory.everDirty.has(key) && memory.written.get(key) !== -1) {
-      memory.written.set(key, -1)
+    if (memory.everDirty.has(key) && memory.written.get(key) !== null) {
+      memory.written.set(key, null)
       remove.push(key)
     }
   }
@@ -105,6 +112,32 @@ export function planAutosave(
   }
 
   return { put, remove, unkeyed }
+}
+
+/**
+ * Which of several dirty tabs on one file gets the snapshot.
+ *
+ * One row per file means one tab's document, and there is no timestamp to choose by —
+ * `revision` counts edits, so "highest revision" means "most edits ever", not "edited most
+ * recently". A tab with thirty edits from an hour ago would win over one with three fresh
+ * ones, forever, and the fresh tab's work would simply never be protected.
+ *
+ * So the tab that was written last keeps the row while it is still dirty, and otherwise the
+ * turn passes. Rotating rather than fixing on one tab means neither is starved: whichever
+ * has changed since its last write is the one that gets written next.
+ */
+function pickDirty(
+  group: readonly AutosaveTab[],
+  last: { documentId: string; revision: number } | null
+): AutosaveTab | undefined {
+  const dirty = group.filter((tab) => tab.unsaved)
+  if (dirty.length <= 1) return dirty[0]
+
+  // Anything that has changed since it was last written goes first.
+  const changed = dirty.filter(
+    (tab) => !last || tab.documentId !== last.documentId || tab.revision !== last.revision
+  )
+  return (changed[0] ?? dirty[0])!
 }
 
 /**
@@ -123,10 +156,17 @@ export function shouldReschedule(
    * dirty/clean pair on one file flip its mark between the revision and -1 on every pass,
    * so this returned true forever and the debounce never settled.
    */
+  /*
+   * Marked per file, but from every tab's state rather than the maximum revision. Taking a
+   * max meant a second dirty tab on the same file could not move the mark — so its edits
+   * never scheduled a flush and were never snapshotted.
+   */
   const marks = new Map<string, number>()
   for (const tab of tabs) {
     const mark = tab.unsaved ? tab.revision : -1
-    marks.set(tab.snapshotKey, Math.max(marks.get(tab.snapshotKey) ?? -1, mark))
+    const key = tab.snapshotKey
+    // Summed, so any tab changing changes the mark; the value itself is meaningless.
+    marks.set(key, (marks.get(key) ?? 0) + mark + 1)
   }
 
   let changed = marks.size !== seen.size

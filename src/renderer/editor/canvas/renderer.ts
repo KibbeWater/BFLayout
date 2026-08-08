@@ -547,13 +547,6 @@ export class LayoutRenderer {
   }
 
   /**
-   * Draws a part pane by drawing the layout it instantiates inside it.
-   *
-   * The part's own transform is already in `entry.world`, so the sub-layout only
-   * needs its magnify factor applied on top. Nesting is bounded by `depth`: parts
-   * can reference each other, and a cycle would otherwise recurse forever.
-   */
-  /**
    * The typeface families a text pane should be drawn with.
    *
    * `fontIndex` addresses the *document's own* font list, which is why this takes the
@@ -565,6 +558,13 @@ export class LayoutRenderer {
     return name ? this.fonts.familiesFor(name) : []
   }
 
+  /**
+   * Draws a part pane by drawing the layout it instantiates inside it.
+   *
+   * The part's own transform is already in `entry.world`, so the sub-layout only
+   * needs its magnify factor applied on top. Nesting is bounded by `depth`: parts
+   * can reference each other, and a cycle would otherwise recurse forever.
+   */
   private buildPart(
     entry: PaneTransform,
     pane: PartPane,

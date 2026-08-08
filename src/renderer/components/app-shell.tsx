@@ -2,12 +2,15 @@ import { useEffect, type ReactNode } from 'react'
 
 import { useAutosave } from '@renderer/lib/use-autosave'
 import { useOpenFile } from '@renderer/lib/use-open-file'
+import { useArchiveSessions } from '@renderer/lib/use-archive-sessions'
 import { useSave } from '@renderer/lib/use-save'
 import { useUnsavedGuard } from '@renderer/lib/use-unsaved-guard'
 import { ErrorBoundary } from './error-boundary'
 
 export function AppShell({ children }: { children: ReactNode }): ReactNode {
   useGlobalCommands()
+  // Frees archive sessions nothing refers to; see the hook for why it is centralised.
+  useArchiveSessions()
   // Recovery snapshots follow the documents, not the route.
   useAutosave()
 
@@ -33,9 +36,10 @@ export function AppShell({ children }: { children: ReactNode }): ReactNode {
  *     screen whose entire purpose is opening something is the welcome screen — so Cmd+O
  *     did nothing precisely where you would reach for it.
  *
- * The editor screen handles these too. Whichever is mounted answers; both being mounted
- * cannot double-open, because opening is a dialog and the second call finds the first one
- * already showing.
+ * The editor screen deliberately does *not* handle these. The preload registers listeners
+ * with `ipcRenderer.on`, which is multi-listener, so having both mounted made one Cmd+O
+ * open two native dialogs — and nothing dedupes them: `openViaDialog` sets a busy flag it
+ * never reads, and the main-side dialog opens unconditionally.
  */
 function useGlobalCommands(): void {
   const { saveAll, saveDocument } = useSave()
