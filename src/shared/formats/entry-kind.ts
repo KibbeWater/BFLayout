@@ -4,6 +4,12 @@ export type ArchiveEntryKind =
   | 'texture'
   | 'font'
   | 'archive'
+  | 'data'
+  | 'message'
+  | 'model'
+  | 'audio'
+  | 'shader'
+  | 'logic'
   | 'other'
 
 const BY_EXTENSION: Record<string, ArchiveEntryKind> = {
@@ -21,6 +27,42 @@ const BY_EXTENSION: Record<string, ArchiveEntryKind> = {
   bffnt: 'font',
   bcfnt: 'font',
   brfnt: 'font',
+  /*
+   * The scalable fonts a `.bfcpx` complex points at, and the complex itself.
+   *
+   * Missing from this table meant every one of them classified as "other" — so the typefaces the
+   * canvas draws real text with were, from the browser's point of view, unrecognised files.
+   */
+  bfttf: 'font',
+  bfotf: 'font',
+  bfcpx: 'font',
+
+  /*
+   * BYML and its `.bgyml` spelling.
+   *
+   * `bgyml` is the single most common file type in a modern romfs — 38,265 entries inside the
+   * archives of one title, against 2,187 animations — and it is ordinary BYML: all 1,763 loose
+   * ones in that dump parse with the existing reader. Leaving the extension off this table meant
+   * forty thousand readable files presented as unrecognised.
+   */
+  byml: 'data',
+  bgyml: 'data',
+  aamp: 'data',
+
+  msbt: 'message',
+  msbp: 'message',
+
+  bfres: 'model',
+  bnsh: 'shader',
+  bfsha: 'shader',
+  sharcb: 'shader',
+
+  bwav: 'audio',
+  bars: 'audio',
+  bfsar: 'audio',
+
+  ainb: 'logic',
+  asb: 'logic',
   szs: 'archive',
   sarc: 'archive',
   arc: 'archive',

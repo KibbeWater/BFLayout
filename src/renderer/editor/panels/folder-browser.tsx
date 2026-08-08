@@ -25,7 +25,7 @@ import {
 import type { FolderEntry, FolderEntryKind, FolderViewMode } from '@shared/contract'
 import { getClient, getOrpc } from '@renderer/lib/orpc'
 import { describeError } from '@renderer/lib/errors'
-import { reportError, reportInfo, reportSuccess } from '@renderer/lib/toast'
+import { reportError, reportSuccess } from '@renderer/lib/toast'
 import { useOpenFile } from '@renderer/lib/use-open-file'
 import { useFolder } from '@renderer/editor/store/folder'
 import { WindowedList } from '@renderer/components/windowed-list'
@@ -445,6 +445,7 @@ function FileRow({ entry, depth }: { entry: FolderEntry; depth: number }): React
   const { openPath } = useOpenFile()
   const showArchive = useFolder((state) => state.showArchiveTab)
   const openByml = useFolder((state) => state.openByml)
+  const openPreview = useFolder((state) => state.openPreview)
   const [busy, setBusy] = useState(false)
 
   const openable = OPENABLE.has(entry.kind)
@@ -482,12 +483,15 @@ function FileRow({ entry, depth }: { entry: FolderEntry; depth: number }): React
             openByml(entry.path)
             break
           default:
-            reportInfo(
-              `Cannot open ${entry.name}`,
-              `${identified.detail}. Detected format: ${identified.format}${
-                identified.compression === 'none' ? '' : `, ${identified.compression} compressed`
-              }.`
-            )
+            /*
+             * Everything else goes to the preview rather than a toast.
+             *
+             * `Cannot open` was wrong about most of what it was shown: fonts, texture containers
+             * and data trees all decode here, and the ones that genuinely do not — BFRES, shaders
+             * — are better served by being told what the file *is* than by being refused. The
+             * preview handles both, and reports the format either way.
+             */
+            openPreview({ kind: 'file', path: entry.path })
             break
         }
       } catch (cause) {

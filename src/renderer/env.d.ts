@@ -13,6 +13,8 @@ interface BFLayoutPreloadApi {
    */
   readonly editUndo?: () => void
   readonly editRedo?: () => void
+  /** Asks main to re-send the window's fullscreen state; see use-fullscreen.ts. */
+  readonly requestFullscreenState?: () => void
 }
 
 interface Window {

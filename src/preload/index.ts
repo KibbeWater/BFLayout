@@ -59,5 +59,19 @@ contextBridge.exposeInMainWorld('bflayout', {
    * cannot, because its meaning depends on focus.
    */
   editUndo: (): void => ipcRenderer.send('edit-undo'),
-  editRedo: (): void => ipcRenderer.send('edit-redo')
+  editRedo: (): void => ipcRenderer.send('edit-redo'),
+
+  /**
+   * Asks main to re-report whether the window is fullscreen.
+   *
+   * Fullscreen state was push-only: main sent it on `enter-full-screen`, `leave-full-screen` and
+   * `did-finish-load`. The last of those can fire before React has mounted and subscribed, and a
+   * window that is *already* fullscreen when it opens — which macOS does when it restores a
+   * space — emits no transition at all. Either way the renderer never learned, and the inset that
+   * keeps clear of the traffic lights stayed in place as a gap with no traffic lights in it.
+   *
+   * A request rather than a reply channel, so the answer arrives through the same path as every
+   * other report and there is one place that decides what the state is.
+   */
+  requestFullscreenState: (): void => ipcRenderer.send('ask-fullscreen')
 })

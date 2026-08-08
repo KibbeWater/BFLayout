@@ -1,6 +1,6 @@
 import { buildMenu } from './menu'
 import { join } from 'node:path'
-import { app, BrowserWindow, dialog, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { Effect } from 'effect'
 
 import type { WindowState } from '@shared/contract'
@@ -134,6 +134,15 @@ function createWindow(restored: WindowState | null): BrowserWindow {
   win.on('enter-full-screen', reportFullscreen)
   win.on('leave-full-screen', reportFullscreen)
   win.webContents.on('did-finish-load', reportFullscreen)
+  /*
+   * And on request, because the three above are not enough on their own: `did-finish-load` can
+   * beat React to mounting its listener, and a window that opens *already* fullscreen — which
+   * macOS does when it restores a space — fires no transition. Without a way to ask, the renderer
+   * kept the traffic-light inset with no traffic lights behind it.
+   */
+  ipcMain.on('ask-fullscreen', (event) => {
+    if (event.sender === win.webContents) reportFullscreen()
+  })
 
   // Debounced so dragging or resizing does not hammer sqlite.
   let saveTimer: NodeJS.Timeout | undefined

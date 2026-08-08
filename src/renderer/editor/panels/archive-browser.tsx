@@ -1,6 +1,8 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  Box,
+  Braces,
   ChevronDown,
   FileQuestion,
   Film,
@@ -8,16 +10,21 @@ import {
   Image,
   Layers,
   Loader2,
+  MessageSquareText,
+  Music,
   Package,
-  Type
+  Sparkles,
+  Type,
+  Workflow
 } from 'lucide-react'
 
 import type { ArchiveEntryInfo } from '@shared/contract'
 import { getClient, getOrpc } from '@renderer/lib/orpc'
 import { describeError } from '@renderer/lib/errors'
-import { reportError, reportInfo, reportSuccess } from '@renderer/lib/toast'
+import { reportError, reportSuccess } from '@renderer/lib/toast'
 import { useOpenLayout } from '@renderer/lib/use-open-layout'
 import { useDocuments } from '@renderer/editor/store/document'
+import { useFolder } from '@renderer/editor/store/folder'
 import { useWorkspace } from '@renderer/editor/store/workspace'
 
 const KIND_ICON: Record<ArchiveEntryInfo['kind'], ReactNode> = {
@@ -26,6 +33,12 @@ const KIND_ICON: Record<ArchiveEntryInfo['kind'], ReactNode> = {
   texture: <Image className="size-3.5 shrink-0 text-muted-foreground" />,
   font: <Type className="size-3.5 shrink-0 text-muted-foreground" />,
   archive: <Package className="size-3.5 shrink-0 text-muted-foreground" />,
+  data: <Braces className="size-3.5 shrink-0 text-muted-foreground" />,
+  message: <MessageSquareText className="size-3.5 shrink-0 text-muted-foreground" />,
+  model: <Box className="size-3.5 shrink-0 text-muted-foreground" />,
+  shader: <Sparkles className="size-3.5 shrink-0 text-muted-foreground/60" />,
+  audio: <Music className="size-3.5 shrink-0 text-muted-foreground" />,
+  logic: <Workflow className="size-3.5 shrink-0 text-muted-foreground/60" />,
   other: <FileQuestion className="size-3.5 shrink-0 text-muted-foreground/60" />
 }
 
@@ -53,6 +66,7 @@ export function ArchiveBrowser(): ReactNode {
   const [closing, setClosing] = useState(false)
   const [busyEntry, setBusyEntry] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const openPreview = useFolder((state) => state.openPreview)
   const queryClient = useQueryClient()
 
   const archive = useQuery({
@@ -344,16 +358,15 @@ export function ArchiveBrowser(): ReactNode {
                           )
                           return
                         }
-                        // Anything else has no viewer here. Saying so beats a click
-                        // that selects a row and appears to do nothing.
-                        reportInfo(
-                          `Cannot open ${leaf}`,
-                          entry.kind === 'texture'
-                            ? 'Textures are listed in the Textures tab, alongside the layout that uses them.'
-                            : entry.kind === 'animation'
-                              ? 'Animations are listed in the timeline once their layout is open.'
-                              : `${leaf} is a ${entry.kind} entry; this editor opens the layouts in an archive.`
-                        )
+                        /*
+                         * Everything else goes to the preview.
+                         *
+                         * These rows used to select and then do nothing but produce a toast — most
+                         * visibly in a font archive, where *every* entry behaved that way, which
+                         * reads as the app being broken rather than a viewer being absent. The
+                         * preview shows what it can and names the format when it cannot.
+                         */
+                        openPreview({ kind: 'archive', archiveId, entryKey: entry.key })
                       }}
                       onAuxClick={(event) => {
                         if (event.button !== 1 || entry.kind !== 'layout') return

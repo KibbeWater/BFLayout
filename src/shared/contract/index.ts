@@ -17,6 +17,7 @@ import {
   recentEntrySchema,
   recentKindSchema,
   fontChainSchema,
+  previewSchema,
   snapshotSummarySchema,
   bymlDocumentSchema,
   folderListingSchema,
@@ -292,6 +293,17 @@ export const fontsContract = {
     .output(fontChainSchema)
 }
 
+/**
+ * A look at a file the editor cannot put on the canvas.
+ *
+ * Most of a romfs is not a layout, and everything else used to be a dead end — classified, then
+ * unopenable. One procedure for both sources, because "open the thing I clicked" should not
+ * depend on whether it is loose on disk or inside an archive.
+ */
+export const previewContract = {
+  open: base.input(z.object({ source: layoutSourceSchema })).output(previewSchema)
+}
+
 export const texturesContract = {
   list: base.input(z.object({ source: layoutSourceSchema })).output(textureListSchema),
   get: base
@@ -386,6 +398,7 @@ export const contract = {
   layout: layoutContract,
   textures: texturesContract,
   fonts: fontsContract,
+  preview: previewContract,
   animation: animationContract,
   folder: folderContract,
   byml: bymlContract,

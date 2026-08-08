@@ -36,6 +36,7 @@ import { ArchiveBrowser } from './panels/archive-browser'
 import { HierarchyPanel } from './panels/hierarchy'
 import { PropertiesPanel } from './panels/properties'
 import { BymlViewer } from './panels/byml-viewer'
+import { PreviewPanel } from './panels/preview'
 import { FolderBrowser } from './panels/folder-browser'
 import { MaterialsPanel } from './panels/materials'
 import { TexturePanel } from './panels/textures'
@@ -295,7 +296,10 @@ function PanelToggles(): ReactNode {
  */
 function MainView(): ReactNode {
   const bymlPath = useFolder((state) => state.bymlPath)
+  const previewing = useFolder((state) => state.previewing)
+  const closePreview = useFolder((state) => state.closePreview)
   const closeByml = useFolder((state) => state.closeByml)
+  if (previewing) return <PreviewPanel source={previewing} onClose={closePreview} />
   if (!bymlPath) return <LayoutCanvas />
 
   return (

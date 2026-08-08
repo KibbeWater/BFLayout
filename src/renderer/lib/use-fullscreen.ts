@@ -14,10 +14,22 @@ export function useFullscreen(): boolean {
   useEffect(() => {
     const api = window.bflayout
     if (!api?.onMenuCommand) return
-    return api.onMenuCommand((command) => {
+    const stop = api.onMenuCommand((command) => {
       if (command === 'fullscreen-on') setFullscreen(true)
       else if (command === 'fullscreen-off') setFullscreen(false)
     })
+
+    /*
+     * Asked for once the listener is in place, rather than relying on having caught a report.
+     *
+     * The three main-side reports — enter, leave, and `did-finish-load` — all happen at moments
+     * this hook may not have been subscribed for: the load report can beat React to mounting, and
+     * a window that opens *already* fullscreen, which macOS does when it restores a space, fires
+     * no transition at all. Both left the inset that clears the traffic lights sitting there with
+     * no traffic lights behind it.
+     */
+    api.requestFullscreenState?.()
+    return stop
   }, [])
 
   return fullscreen

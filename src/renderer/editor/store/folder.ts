@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 
+import type { LayoutSource } from '@shared/contract'
+
 /**
  * The folder being browsed, plus where we have been.
  *
@@ -41,6 +43,16 @@ interface FolderStore {
   setTab: (tab: SidebarTab) => void
   openByml: (path: string) => void
   closeByml: () => void
+  /**
+   * The file being previewed, or null.
+   *
+   * A `LayoutSource` rather than a path because the same panel serves a loose file and an archive
+   * entry — clicking a font inside a `.bfarc` and clicking one on disk should land in the same
+   * place, and only the source differs.
+   */
+  previewing: LayoutSource | null
+  openPreview: (source: LayoutSource) => void
+  closePreview: () => void
   showArchiveTab: () => void
 }
 
@@ -67,12 +79,18 @@ export const useFolder = create<FolderStore>((set, get) => ({
     set({ path: previous, history: history.slice(0, -1) })
   },
 
-  close: () => set({ rootPath: null, path: null, history: [], bymlPath: null }),
+  close: () => set({ rootPath: null, path: null, history: [], bymlPath: null, previewing: null }),
 
   setTab: (tab) => set({ tab }),
 
-  openByml: (bymlPath) => set({ bymlPath }),
+  // Opening one closes the other: both take over the main area, and showing them at once would
+  // mean deciding which wins.
+  openByml: (bymlPath) => set({ bymlPath, previewing: null }),
   closeByml: () => set({ bymlPath: null }),
+
+  previewing: null,
+  openPreview: (previewing) => set({ previewing, bymlPath: null }),
+  closePreview: () => set({ previewing: null }),
 
   showArchiveTab: () => set({ tab: 'archive' })
 }))

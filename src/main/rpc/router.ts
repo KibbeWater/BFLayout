@@ -9,6 +9,7 @@ import { BymlService } from '@main/services/byml'
 import { SnapshotService } from '@main/services/snapshots'
 import { FolderService } from '@main/services/folder'
 import { FontService } from '@main/services/fonts'
+import { PreviewService } from '@main/services/preview'
 import { LayoutService } from '@main/services/layout'
 import { RecentsService } from '@main/services/recents'
 import { SettingsService } from '@main/services/settings'
@@ -317,6 +318,12 @@ const fontRoutes = {
   )
 }
 
+const previewRoutes = {
+  open: os.preview.open.handler(({ input }) =>
+    run(Effect.flatMap(PreviewService, (s) => s.open(input.source)))
+  )
+}
+
 const bymlRoutes = {
   open: os.byml.open.handler(({ input }) =>
     run(Effect.flatMap(BymlService, (s) => s.open(input.path)))
@@ -332,6 +339,7 @@ export const router = os.router({
   animation: animationRoutes,
   folder: folderRoutes,
   fonts: fontRoutes,
+  preview: previewRoutes,
   byml: bymlRoutes,
   snapshot: snapshotRoutes
 })

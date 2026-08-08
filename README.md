@@ -14,6 +14,7 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | Materials (colours, blend, alpha compare, texture maps) | Editable |
 | Window panes (nine-slice / pinwheel frames) | Working |
 | Text panes | Drawn in the game's own typeface; glyph layout is still approximate |
+| Other formats | Previewable read-only: fonts with glyph rendering, BNTX textures, BYML/`bgyml` trees, MSBT message tables |
 | Undo / redo | Working — every edit, including property, material and visibility |
 | Add / delete / duplicate pane, grid snapping | Working |
 | Reorder and reparent panes (z-order) | Working — buttons and Alt+arrows |
@@ -374,6 +375,48 @@ would throw away the one piece of information available — but a field quietly 
 pane's number while eleven others hold something else invites an overwrite nobody intended.
 The kind-specific fields below do not carry the marker yet; they apply only to panes sharing
 the active pane's kind, which is a smaller set to be surprised by.
+
+### Most of a romfs is not a layout
+
+Everything that was not a layout used to be a dead end. The file tree and the archive browser
+would classify a file and then refuse to open it — for formats this build reads perfectly well —
+and a *font archive* was the worst case: it opened as an archive whose every entry did nothing,
+which reads as the app being broken rather than a feature being absent.
+
+There is now a **preview** for anything that is not a layout, with one entry point for a loose file
+and an archive entry alike, chosen by sniffing the bytes rather than trusting an extension:
+
+- **Fonts.** A `.bfarc` shows its `.bfcpx` fallback chains in order, flags any face a chain names
+  that the archive does not hold, and renders **actual glyphs** for each face at an adjustable size.
+- **Textures.** A `.bntx` enumerates its textures with dimensions, mip counts and format, marking
+  any this build has no decoder for.
+- **Data.** BYML and `bgyml` open in the existing tree viewer.
+- **Message tables.** MSBT shows every string with its label, filterable.
+- **Anything else** names itself — "BFRES is a model format this build does not read yet" — rather
+  than saying "cannot open".
+
+A classification bug is worth recording here, because it was hiding the most common thing in a
+modern romfs. `bgyml` was not in the entry table, so it classified as `other`: **38,265 entries** in
+one title's archives, more than every layout, animation and texture combined, presented as
+unrecognised files — and all 1,763 loose ones parse with the BYML reader that already existed. The
+scalable fonts the canvas draws real text with were unclassified for the same reason. A unit test
+actively asserted the old behaviour; it now asserts the new one, with the reasoning.
+
+### Message tables
+
+MSBT holds every string a game shows — 3,406 files and 61 MB of text in one title. `pnpm
+validate:msbt` parses **3,406 of 3,406**, yielding 333,671 messages, every one of them labelled.
+
+The layout was worked out from a hex dump rather than documentation, and two decisions in it are
+deliberate. Inline commands — colour changes, button glyphs, variable substitution — are encoded as
+escape sequences rather than characters; decoding them as text gives garbage and dropping them hides
+that a variable is being interpolated, so they become visible `{n:group.type}` placeholders and the
+viewer dims them so the words still read as words. And sections the parser does not model are
+skipped by their declared size, which is what lets `ATO1`, `ATR1` and `TSY1` cost nothing.
+
+UTF-8 is hand-rolled because `shared` has no DOM — that purity gate is what lets these codecs run
+unchanged in main, the renderer and tests — and malformed sequences become U+FFFD rather than
+throwing, because a table is worth reading with one damaged string in it.
 
 ### Getting things out of an archive, and back in
 

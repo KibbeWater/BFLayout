@@ -2,7 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Loader2, Search } from 'lucide-react'
 
-import type { BymlNodeView } from '@shared/contract'
+import type { BymlDocumentView, BymlNodeView } from '@shared/contract'
 import { formatScalar, isViewContainer, viewChildCount } from '@shared/formats/byml'
 import { getOrpc } from '@renderer/lib/orpc'
 import { describeError } from '@renderer/lib/errors'
@@ -67,7 +67,36 @@ export function BymlViewer({ path }: { path: string }): ReactNode {
           BYML v{data.version} · {data.littleEndian ? 'little-endian' : 'big-endian'} ·{' '}
           {data.nodeCount.toLocaleString()} nodes · read-only
         </p>
-        <div className="mt-1.5 flex items-center gap-1 rounded border bg-input/40 px-1.5">
+      </div>
+      <BymlTree document={data} filter={filter} onFilter={setFilter} />
+    </div>
+  )
+}
+
+/**
+ * The filter box and the tree itself, without the file heading.
+ *
+ * Split out so the preview panel can show a `bgyml` entry from inside an archive with the same
+ * tree rather than a worse copy of it — `bgyml` is the most common file type in a modern romfs,
+ * and almost all of them live in archives.
+ */
+export function BymlTree({
+  document: data,
+  filter: controlledFilter,
+  onFilter
+}: {
+  document: BymlDocumentView
+  filter?: string
+  onFilter?: (value: string) => void
+}): ReactNode {
+  const [ownFilter, setOwnFilter] = useState('')
+  const filter = controlledFilter ?? ownFilter
+  const setFilter = onFilter ?? setOwnFilter
+
+  return (
+    <>
+      <div className="shrink-0 border-b px-3 py-1.5">
+        <div className="flex items-center gap-1 rounded border bg-input/40 px-1.5">
           <Search className="size-3 shrink-0 text-muted-foreground/60" />
           <input
             value={filter}
@@ -91,7 +120,7 @@ export function BymlViewer({ path }: { path: string }): ReactNode {
           />
         )}
       </div>
-    </div>
+    </>
   )
 }
 

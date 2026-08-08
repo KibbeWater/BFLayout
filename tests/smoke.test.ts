@@ -42,8 +42,25 @@ describe('entry classification', () => {
     expect(classifyEntry('/games/romfs/Layout/Thing.blarc.zs')).toBe('archive')
   })
 
-  it('returns other for anything unrecognised', () => {
-    expect(classifyEntry('Actor.bgyml')).toBe('other')
+  it('classifies the formats the browser can now open', () => {
+    /*
+     * `bgyml` used to be expected to classify as `other`, and that expectation was the bug: it is
+     * ordinary BYML, it accounts for 38,265 entries in one title's archives — more than every
+     * layout, animation and texture combined — and every one of them parses with the existing
+     * reader. Presenting them as unrecognised files made the most common thing in a romfs
+     * unopenable.
+     */
+    expect(classifyEntry('Actor.bgyml')).toBe('data')
+    expect(classifyEntry('Params.byml')).toBe('data')
+    expect(classifyEntry('Talk.msbt')).toBe('message')
+    // The scalable fonts the canvas draws real text with were unclassified too.
+    expect(classifyEntry('scft/Font.bfttf')).toBe('font')
+    expect(classifyEntry('fcpx/System_00.bfcpx')).toBe('font')
+    expect(classifyEntry('Model.bfres')).toBe('model')
+  })
+
+  it('returns other for anything genuinely unrecognised', () => {
     expect(classifyEntry('noextension')).toBe('other')
+    expect(classifyEntry('Thing.qqq')).toBe('other')
   })
 })

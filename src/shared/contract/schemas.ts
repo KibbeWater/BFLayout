@@ -83,12 +83,29 @@ export const okSchema = z.object({ ok: z.literal(true) })
 
 export const compressionKindSchema = z.enum(['none', 'yaz0', 'zstd'])
 
+/**
+ * What an archive entry is, for an icon and for deciding what a click does.
+ *
+ * Wider than it was, and the reason is worth stating: `bgyml` alone accounts for 38,265 entries
+ * in one title's archives — more than every layout, animation and texture combined — and it was
+ * classified as `other`, which is to say presented as an unrecognised file even though the BYML
+ * reader parses all of them. Same for the scalable fonts the canvas draws real text with.
+ */
 export const archiveEntryKindSchema = z.enum([
   'layout',
   'animation',
   'texture',
   'font',
   'archive',
+  /** BYML, `bgyml` and AAMP: parameter and data trees. */
+  'data',
+  /** MSBT and MSBP: the game's text. */
+  'message',
+  'model',
+  'shader',
+  'audio',
+  /** AINB and ASB: logic graphs. */
+  'logic',
   'other'
 ])
 
@@ -301,6 +318,75 @@ export const bymlDocumentSchema = z.custom<BymlDocumentView>(
 )
 
 export type { BymlDocumentView, BymlNodeView }
+
+/**
+ * What could be made of a file the editor cannot put on the canvas.
+ *
+ * Most of a romfs is not a layout. Everything else was either unclassified or classified and
+ * then unopenable — clicking a font, a texture container or a data tree in the browser reported
+ * "cannot open" for files this build reads perfectly well, and a font *archive* opened as an
+ * archive whose every entry did nothing. This is where those go.
+ *
+ * `content` is a union rather than a set of optional fields so that adding a format cannot
+ * silently produce a preview with nothing in it: a new kind has to be handled where it is read.
+ */
+export const previewContentSchema = z.discriminatedUnion('kind', [
+  /**
+   * A font archive, or a single face. `complexes` are the `.bfcpx` fallback chains; `faces` carry
+   * the decoded sfnt bytes so the renderer can register them and draw actual glyphs.
+   */
+  z.object({
+    kind: z.literal('font'),
+    faces: z.array(
+      z.object({
+        name: z.string(),
+        kind: z.enum(['otf', 'ttf', 'ttc']),
+        bytes: z.number().int(),
+        sfnt: binaryPayloadSchema
+      })
+    ),
+    complexes: z.array(z.object({ name: z.string(), faces: z.array(z.string()) })),
+    /** Faces a complex named that are not in this archive, so the gap is visible. */
+    missing: z.array(z.string())
+  }),
+  /** BYML, `bgyml` or AAMP: a parameter tree, shown with the existing viewer. */
+  z.object({ kind: z.literal('data'), document: bymlDocumentSchema }),
+  /**
+   * MSBT: a game's text.
+   *
+   * Capped rather than sent whole — one table can hold thousands of strings and a single title
+   * holds 333,671 of them, so the total is reported and the payload is not.
+   */
+  z.object({
+    kind: z.literal('messages'),
+    encoding: z.enum(['utf-8', 'utf-16']),
+    total: z.number().int(),
+    messages: z.array(
+      z.object({ label: z.string(), index: z.number().int(), text: z.string() })
+    )
+  }),
+  /** A BNTX container's own textures, listed for the thumbnail grid. */
+  z.object({ kind: z.literal('textures'), textures: z.array(textureInfoSchema) }),
+  /**
+   * Recognised but with nothing to show yet. Carries the reason, because "this build does not
+   * decode BFRES" and "this file is damaged" are different things to be told.
+   */
+  z.object({ kind: z.literal('unsupported'), reason: z.string() })
+])
+
+export type PreviewContent = z.infer<typeof previewContentSchema>
+
+export const previewSchema = z.object({
+  /** Filename or archive entry key, for the heading. */
+  name: z.string(),
+  /** Four-character magic or a friendly name, e.g. `BFOTF`. */
+  format: z.string(),
+  compression: compressionKindSchema,
+  bytes: z.number().int(),
+  content: previewContentSchema
+})
+
+export type Preview = z.infer<typeof previewSchema>
 
 export const animationDocumentSchema = z.custom<AnimationDocument>(
   (value) => typeof value === 'object' && value !== null
