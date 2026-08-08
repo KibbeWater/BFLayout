@@ -16,6 +16,7 @@ import { TextureService } from '@main/services/textures'
 import { WindowStateService } from '@main/services/window-state'
 import { WorkspaceService } from '@main/services/workspace'
 import { NotFoundError } from '@main/errors'
+import { FormatWriteError } from '@shared/binary/errors'
 import { setUnsavedCount } from '@main/unsaved'
 import { run } from './run'
 
@@ -159,11 +160,43 @@ const archiveRoutes = {
     )
   ),
 
+  /**
+   * Replacing an entry is refused while a document from it is open.
+   *
+   * Otherwise the import is silently undone: that tab holds its own copy of the layout, and its
+   * next save re-encodes *that* over the bytes just imported. The user would see a successful
+   * import, keep working, save, and find their imported file gone with nothing having reported a
+   * problem.
+   *
+   * The check lives here rather than in ArchiveService because only LayoutService knows what is
+   * open, and it depends on ArchiveService — so the router is the one place that can see both.
+   * It is main-side on purpose: the archive and the sessions both live here, and a renderer
+   * guard would be advisory.
+   */
   importEntry: os.archive.importEntry.handler(({ input }) =>
     run(
-      Effect.flatMap(ArchiveService, (s) =>
-        s.importEntry(input.archiveId, input.entryKey, input.path)
-      )
+      Effect.gen(function* () {
+        const layouts = yield* LayoutService
+        const open = yield* layouts.list
+        const holder = open.find(
+          (entry) =>
+            entry.source.kind === 'archive' &&
+            entry.source.archiveId === input.archiveId &&
+            entry.source.entryKey === input.entryKey
+        )
+        if (holder) {
+          return yield* Effect.fail(
+            new FormatWriteError({
+              format: 'sarc',
+              section: input.entryKey,
+              message: `${holder.displayName} is open in the editor; close that tab before replacing it, or its next save will overwrite the imported file`
+            })
+          )
+        }
+
+        const archives = yield* ArchiveService
+        return yield* archives.importEntry(input.archiveId, input.entryKey, input.path)
+      })
     )
   ),
 

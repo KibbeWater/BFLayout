@@ -392,8 +392,20 @@ not started. Doing it properly needs a BNTX writer, a BCn/ASTC **compressor** an
 Tegra swizzle — none of which exist here, and all of which are large. Swapping in a `.bntx`
 built in another tool needs none of them.
 
-Two refusals are deliberate. An entry whose name could not be recovered **cannot** be replaced,
-because the SARC writer addresses entries by name; the row says so rather than failing opaquely.
+Three refusals are deliberate.
+
+An entry whose name could not be recovered **cannot** be replaced, because the SARC writer
+addresses entries by name; the row says so rather than failing opaquely.
+
+Replacing the entry a **tab is currently editing** is refused too, and this one is the
+interesting case: that tab holds its own copy of the layout, so its next save re-encodes *that*
+over the bytes just imported. The import would appear to succeed, the user would keep working,
+save, and find their imported file gone with nothing having reported a problem. The check lives
+in the RPC router rather than in `ArchiveService`, because only `LayoutService` knows what is
+open and it already depends on the archive service — the router is the one place that sees both.
+Main-side on purpose: a renderer guard would be advisory, which is the lesson from the archive
+Close button below.
+
 And imported bytes are **reported, not validated** — refusing anything this build cannot parse
 would block the legitimate case of a format it does not model, while accepting silently would
 let someone leave an unreadable entry in an archive and find out much later. So the toast names

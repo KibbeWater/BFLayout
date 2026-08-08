@@ -1148,8 +1148,32 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
 
     const archiveId = tab.source.archiveId
     const before = await c.archive.get({ archiveId })
-    const entry = before.entries.find(e => e.named && e.kind === 'layout')
-    if (!entry) return { skipped: 'no named layout entry' }
+    /*
+     * An entry no tab is editing, because replacing one that is open is refused — which the
+     * first version of this check ran straight into by picking the first named layout, the very
+     * one the fixture opens.
+     */
+    const entry = before.entries.find(e => e.named && e.key !== tab.source.entryKey)
+    if (!entry) return { skipped: 'no named entry that is not already open' }
+
+    /*
+     * Replacing the entry a tab is editing has to be refused. The tab holds its own copy, so its
+     * next save would re-encode that over the imported bytes — a successful import, silently
+     * undone later, with nothing having reported a problem.
+     */
+    const scratchForOpen = ${JSON.stringify(join(tmpdir(), 'bflayout-selftest-openentry.bin'))}
+    await c.archive.extractEntry({ archiveId, entryKey: tab.source.entryKey, path: scratchForOpen })
+    let openRefused = null
+    try {
+      await c.archive.importEntry({
+        archiveId,
+        entryKey: tab.source.entryKey,
+        path: scratchForOpen
+      })
+      openRefused = false
+    } catch {
+      openRefused = true
+    }
 
     const scratch = ${JSON.stringify(join(tmpdir(), 'bflayout-selftest-entry.bin'))}
     const written = await c.archive.extractEntry({ archiveId, entryKey: entry.key, path: scratch })
@@ -1179,6 +1203,7 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       detected: result.detected,
       sizeHeld: sameEntry ? sameEntry.size : -1,
       count: after.entries.length === before.entries.length,
+      openRefused,
       unnamedRefused
     }
   })()`)) as {
@@ -1190,6 +1215,7 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     detected?: string
     sizeHeld?: number
     count?: boolean
+    openRefused?: boolean | null
     unnamedRefused?: boolean | null
   }
 
@@ -1207,6 +1233,10 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     check(
       entryIo.sizeHeld === entryIo.declared && entryIo.count === true,
       `re-importing left the archive holding the same entry, same size (${entryIo.sizeHeld})`
+    )
+    check(
+      entryIo.openRefused === true,
+      'replacing the entry a tab is editing is refused, so a later save cannot undo the import'
     )
     if (entryIo.unnamedRefused === null) {
       out.push('SKIP unnamed entry replacement refusal (every entry in this archive is named)')
