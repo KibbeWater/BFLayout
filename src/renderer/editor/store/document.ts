@@ -81,8 +81,16 @@ interface DocumentStore {
   runCommand: (command: Command) => void
   undo: () => void
   redo: () => void
-  /** Clears the unsaved flag on one tab, or the active one when omitted. */
-  markSaved: (documentId?: string) => void
+  /**
+   * Clears the unsaved flag on one tab, or the active one when omitted.
+   *
+   * `atRevision` guards a save race: the document is serialized and shipped to main
+   * asynchronously, so an edit made while that was in flight is not in the bytes on
+   * disk. Clearing the flag anyway made those edits look saved, and closing the tab
+   * then discarded them without asking. Pass the revision the save was built from and
+   * the flag only clears if nothing has changed since.
+   */
+  markSaved: (documentId?: string, atRevision?: number) => void
   /** Points a tab at a new file after a save-as. */
   retarget: (documentId: string, source: LayoutSource, displayName: string) => void
 }
@@ -261,13 +269,14 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
       })
     })),
 
-  markSaved: (documentId?: string) =>
+  markSaved: (documentId?: string, atRevision?: number) =>
     set((state) => ({
-      tabs: state.tabs.map((tab) =>
-        tab.documentId === (documentId ?? state.activeId)
-          ? { ...tab, unsaved: false, savedDepth: tab.history.undo.length }
-          : tab
-      )
+      tabs: state.tabs.map((tab) => {
+        if (tab.documentId !== (documentId ?? state.activeId)) return tab
+        // Edited since the save was built: those changes are not on disk.
+        if (atRevision !== undefined && tab.revision !== atRevision) return tab
+        return { ...tab, unsaved: false, savedDepth: tab.history.undo.length }
+      })
     })),
 
   retarget: (documentId, source, displayName) =>

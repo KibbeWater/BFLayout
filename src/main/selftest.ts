@@ -1056,6 +1056,53 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * An edit made while a save is in flight must not be reported as saved. Serializing
+   * and writing is asynchronous, so those bytes are not on disk — and clearing the flag
+   * anyway meant closing the tab later discarded the edit without asking.
+   */
+  const saveRace = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    const at = (id) => dev.documents.getState().tabs.find(t => t.documentId === id)
+
+    // Make it dirty, and remember the revision a save would have been built from.
+    const target = tab.document.rootPane.children[0]
+    store.select([target.id])
+    await new Promise(r => setTimeout(r, 150))
+    window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'ArrowRight', bubbles: true, cancelable: true
+    }))
+    await new Promise(r => setTimeout(r, 250))
+    const builtFrom = at(tab.documentId).revision
+
+    // Another edit lands while the imaginary save is still in flight.
+    window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'ArrowRight', bubbles: true, cancelable: true
+    }))
+    await new Promise(r => setTimeout(r, 250))
+
+    // The save completes, reporting the revision it was built from.
+    dev.documents.getState().markSaved(tab.documentId, builtFrom)
+    await new Promise(r => setTimeout(r, 200))
+    const staleIgnored = at(tab.documentId).unsaved
+
+    // With the current revision it does clear.
+    dev.documents.getState().markSaved(tab.documentId, at(tab.documentId).revision)
+    await new Promise(r => setTimeout(r, 200))
+    return { staleIgnored, current: at(tab.documentId).unsaved }
+  })()`)) as { error?: string; staleIgnored?: boolean; current?: boolean }
+
+  if (saveRace.error) {
+    check(false, `save race: ${saveRace.error}`)
+  } else {
+    check(saveRace.staleIgnored === true, 'a save built from a stale revision leaves the tab unsaved')
+    check(saveRace.current === false, 'a save built from the current revision clears the flag')
+  }
+
+  /*
    * Texture export writes a real PNG. Textures are otherwise read-only, and the
    * archives ship BNTX with Tegra swizzling and BCn or ASTC compression that no image
    * editor opens, so this is the only way one gets out.

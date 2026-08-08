@@ -54,6 +54,15 @@ export function useSave(): SaveControls {
    */
   const saveTab = async (target: DocumentTab, targetPath?: string): Promise<boolean> => {
     const client = getClient()
+    /*
+     * The revision the bytes were built from.
+     *
+     * Serializing and writing is asynchronous, so an edit made in the meantime is not
+     * in the file. `markSaved` refuses to clear the flag if the revision moved, which
+     * leaves the tab correctly marked unsaved rather than silently losing the edit
+     * when it is later closed.
+     */
+    const builtFrom = target.revision
 
     try {
       if (target.source.kind === 'archive') {
@@ -87,7 +96,7 @@ export function useSave(): SaveControls {
         if (result.source.kind === 'file') await noteRecent(result.source.path, 'layout')
       }
 
-      markSaved(target.documentId)
+      markSaved(target.documentId, builtFrom)
       return true
     } catch (cause) {
       reportError(cause, { retry: () => void saveTab(target, targetPath) })
