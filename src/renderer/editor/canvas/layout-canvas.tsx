@@ -78,6 +78,19 @@ interface DragState {
   readonly startX: number
   readonly startY: number
   readonly origins: Map<string, [number, number]>
+  /**
+   * The dragged pane's world bounds as they were when the drag began.
+   *
+   * Captured once rather than read from `renderer.flattened` each frame. That array
+   * is rebuilt on every mutation, and the drag mutates per pointermove, so mid-drag
+   * it holds the pane at its *previous frame's* position — while the delta being
+   * tested is measured from the drag origin. Adding the two double-counted every
+   * frame after the first, so guides engaged around halfway to the target and the
+   * pane landed short of the line it had just drawn.
+   *
+   * Null when more than one pane is moving, which is when guides do not apply.
+   */
+  readonly originBounds: readonly [number, number, number, number] | null
 }
 
 /** In-progress resize of a single pane. */
@@ -180,7 +193,14 @@ export function LayoutCanvas(): ReactNode {
       const tab = state.tabs.find((entry) => entry.documentId === state.activeId)
       if (!tab) return
 
-      const moves = paneIds
+      /*
+       * Panes whose ancestor is also selected are dropped, the same way the drag
+       * path does it: a child already moves with its parent's translate, so nudging
+       * both moved the child twice as far.
+       */
+      const moving = independentSelection(rendererRef.current?.flattened ?? [], paneIds)
+
+      const moves = moving
         .map((id) => paneById(tab.document, id))
         .filter((pane): pane is Pane => pane !== null)
         .map((pane) => ({
@@ -209,14 +229,32 @@ export function LayoutCanvas(): ReactNode {
     const tab = state.tabs.find((entry) => entry.documentId === state.activeId)
     if (!tab) return
 
+    /*
+     * Descendants of another selected pane are skipped: duplicating a parent already
+     * copies its whole subtree, so duplicating both produced the child twice — once
+     * inside the parent's copy and once beside the original.
+     */
+    const roots = independentSelection(rendererRef.current?.flattened ?? [], paneIds)
+
     // Built and applied one at a time so each copy sees the names the previous one
     // took, and so the insert indices stay valid.
     const commands: Command[] = []
-    for (const id of paneIds) {
+    const copies: string[] = []
+    for (const id of roots) {
+      const before = new Set(
+        (paneById(tab.document, id) ? parentOf(tab.document, id)?.children ?? [] : []).map(
+          (child) => child.id
+        )
+      )
       const command = duplicatePane(tab.document, id)
       if (!command) continue
       command.apply(tab.document)
       commands.push(command)
+
+      // The copy is whichever sibling was not there a moment ago.
+      const after = parentOf(tab.document, id)?.children ?? []
+      const copy = after.find((child) => !before.has(child.id))
+      if (copy) copies.push(copy.id)
     }
 
     if (commands.length === 0) return
@@ -226,6 +264,9 @@ export function LayoutCanvas(): ReactNode {
         commands
       )
     )
+    // Select the copies, so duplicate-then-nudge moves the new panes rather than
+    // silently moving the originals again.
+    if (copies.length > 0) state.select(copies)
   }, [])
 
   /** Deletes every selected pane, as one undo entry. */
@@ -539,7 +580,19 @@ export function LayoutCanvas(): ReactNode {
       if (pane) origins.set(id, [pane.translate[0], pane.translate[1]])
     }
 
-    dragRef.current = { paneIds: [...origins.keys()], startX: x, startY: y, origins }
+    const single = moving.length === 1 ? moving[0] : undefined
+    const singleEntry =
+      single === undefined
+        ? undefined
+        : renderer.flattened.find((candidate) => candidate.pane.id === single)
+
+    dragRef.current = {
+      paneIds: [...origins.keys()],
+      startX: x,
+      startY: y,
+      origins,
+      originBounds: singleEntry ? worldBounds(singleEntry) : null
+    }
     event.currentTarget.setPointerCapture(event.pointerId)
   }
 
@@ -643,22 +696,19 @@ export function LayoutCanvas(): ReactNode {
     const renderer = rendererRef.current
     const firstId = drag.paneIds[0]
     const firstOrigin = firstId === undefined ? undefined : drag.origins.get(firstId)
-    if (!event.altKey && renderer && drag.paneIds.length === 1 && firstOrigin) {
-      const entry = renderer.flattened.find((candidate) => candidate.pane.id === firstId)
-      if (entry) {
-        // What the grid actually moved the pane by, which is what the bounds move by.
-        const snappedDx = place(firstOrigin[0] + dx) - firstOrigin[0]
-        const snappedDy = place(firstOrigin[1] + dy) - firstOrigin[1]
-        const [l, b, r, t] = worldBounds(entry)
-        const result = alignmentSnap(
-          [l + snappedDx, b + snappedDy, r + snappedDx, t + snappedDy],
-          alignmentCandidates(renderer.flattened, drag.paneIds),
-          GUIDE_THRESHOLD_PIXELS / cameraRef.current.zoom
-        )
-        guideDx = result.dx
-        guideDy = result.dy
-        shown = result.guides
-      }
+    if (!event.altKey && renderer && drag.originBounds && firstOrigin) {
+      // What the grid actually moved the pane by, which is what the bounds move by.
+      const snappedDx = place(firstOrigin[0] + dx) - firstOrigin[0]
+      const snappedDy = place(firstOrigin[1] + dy) - firstOrigin[1]
+      const [l, b, r, t] = drag.originBounds
+      const result = alignmentSnap(
+        [l + snappedDx, b + snappedDy, r + snappedDx, t + snappedDy],
+        alignmentCandidates(renderer.flattened, drag.paneIds),
+        GUIDE_THRESHOLD_PIXELS / cameraRef.current.zoom
+      )
+      guideDx = result.dx
+      guideDy = result.dy
+      shown = result.guides
     }
     setGuides(shown)
 
@@ -1061,6 +1111,16 @@ function toLocalDelta(entry: PaneTransform, dx: number, dy: number): [number, nu
  * Children already move with their parent, so including both would apply the drag
  * delta twice and the child would race ahead.
  */
+/** The pane that has `paneId` as a direct child, or null for the root. */
+function parentOf(document: LayoutDocument, paneId: string): Pane | null {
+  if (!document.rootPane) return null
+  let found: Pane | null = null
+  walkPanes(document.rootPane, (pane) => {
+    if (pane.children.some((child) => child.id === paneId)) found = pane
+  })
+  return found
+}
+
 function independentSelection(
   flattened: readonly PaneTransform[],
   selected: readonly string[]
