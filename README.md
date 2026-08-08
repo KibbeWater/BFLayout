@@ -375,6 +375,30 @@ pane's number while eleven others hold something else invites an overwrite nobod
 The kind-specific fields below do not carry the marker yet; they apply only to panes sharing
 the active pane's kind, which is a smaller set to be surprised by.
 
+### Getting things out of an archive, and back in
+
+Until recently nothing but a decoded texture could leave an archive. Layouts, animations,
+texture containers and BYML were all readable *inside* the app and unreachable from outside it
+— which is most of what someone using the tool this replaces does all day. Each entry row now
+has **Extract** and **Replace**.
+
+The bytes are exactly what the archive holds: compression in a `.szs` wraps the whole SARC,
+not each entry, so what lands on disk is what the game's own loader would see, and re-importing
+it changes nothing. The end-to-end pass asserts that round trip, because anything else would
+mean the compression layer or the SARC writer is touching entries it should not.
+
+Replacement is also the practical answer to importing a texture, which the roadmap lists as
+not started. Doing it properly needs a BNTX writer, a BCn/ASTC **compressor** and a forward
+Tegra swizzle — none of which exist here, and all of which are large. Swapping in a `.bntx`
+built in another tool needs none of them.
+
+Two refusals are deliberate. An entry whose name could not be recovered **cannot** be replaced,
+because the SARC writer addresses entries by name; the row says so rather than failing opaquely.
+And imported bytes are **reported, not validated** — refusing anything this build cannot parse
+would block the legitimate case of a format it does not model, while accepting silently would
+let someone leave an unreadable entry in an archive and find out much later. So the toast names
+what arrived (`FLYT`, `BNTX`, `zstd`, `unrecognised`) and leaves the judgement where it belongs.
+
 ### Closing an archive is a button, not a heuristic
 
 Nothing used to close an archive at all, so every one opened stayed open for the session. That

@@ -1127,6 +1127,98 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * Entries come out and go back in.
+   *
+   * Until now nothing but a decoded texture could leave an archive: layouts, animations, texture
+   * containers and BYML were all readable inside the app and unreachable from outside it, which
+   * is most of what someone using the tool this replaces does all day. Replacement is also the
+   * practical route to importing a texture — doing that properly needs a BNTX writer, a BCn/ASTC
+   * compressor and a forward Tegra swizzle, none of which exist here.
+   *
+   * The round trip is what makes it trustworthy: extract, re-import, and the archive must hold
+   * exactly what it held before. Anything else means the compression layer or the SARC writer is
+   * touching entries it should not.
+   */
+  const entryIo = (await win.webContents.executeJavaScript(`(async () => {
+    const c = window.__bfclient
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab || tab.source.kind !== 'archive') return { skipped: 'no archive-backed tab' }
+
+    const archiveId = tab.source.archiveId
+    const before = await c.archive.get({ archiveId })
+    const entry = before.entries.find(e => e.named && e.kind === 'layout')
+    if (!entry) return { skipped: 'no named layout entry' }
+
+    const scratch = ${JSON.stringify(join(tmpdir(), 'bflayout-selftest-entry.bin'))}
+    const written = await c.archive.extractEntry({ archiveId, entryKey: entry.key, path: scratch })
+
+    // Straight back in: the archive must be indistinguishable from before.
+    const result = await c.archive.importEntry({ archiveId, entryKey: entry.key, path: scratch })
+    const after = await c.archive.get({ archiveId })
+    const sameEntry = after.entries.find(e => e.key === entry.key)
+
+    // An unnamed entry cannot be replaced, and has to say so rather than corrupt anything.
+    let unnamedRefused = null
+    const unnamed = before.entries.find(e => !e.named)
+    if (unnamed) {
+      try {
+        await c.archive.importEntry({ archiveId, entryKey: unnamed.key, path: scratch })
+        unnamedRefused = false
+      } catch {
+        unnamedRefused = true
+      }
+    }
+
+    return {
+      name: entry.displayName,
+      extracted: written.bytes,
+      declared: entry.size,
+      reimported: result.bytes,
+      detected: result.detected,
+      sizeHeld: sameEntry ? sameEntry.size : -1,
+      count: after.entries.length === before.entries.length,
+      unnamedRefused
+    }
+  })()`)) as {
+    skipped?: string
+    name?: string
+    extracted?: number
+    declared?: number
+    reimported?: number
+    detected?: string
+    sizeHeld?: number
+    count?: boolean
+    unnamedRefused?: boolean | null
+  }
+
+  if (entryIo.skipped) {
+    out.push(`SKIP archive entry extract/import (${entryIo.skipped})`)
+  } else {
+    check(
+      entryIo.extracted === entryIo.declared,
+      `extracting ${entryIo.name} wrote exactly what the archive holds (${entryIo.extracted} of ${entryIo.declared} bytes)`
+    )
+    check(
+      entryIo.detected !== undefined && entryIo.detected !== 'unrecognised',
+      `the re-imported bytes were recognised as ${entryIo.detected}`
+    )
+    check(
+      entryIo.sizeHeld === entryIo.declared && entryIo.count === true,
+      `re-importing left the archive holding the same entry, same size (${entryIo.sizeHeld})`
+    )
+    if (entryIo.unnamedRefused === null) {
+      out.push('SKIP unnamed entry replacement refusal (every entry in this archive is named)')
+    } else {
+      check(
+        entryIo.unnamedRefused === true,
+        'replacing an entry with no stored name is refused rather than guessed at'
+      )
+    }
+  }
+
+  /*
    * Closing an archive is possible, and refuses when it would break something.
    *
    * Nothing used to close one at all, so every archive opened stayed open for the session —

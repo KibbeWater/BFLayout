@@ -151,6 +151,22 @@ const archiveRoutes = {
     run(Effect.flatMap(ArchiveService, (s) => s.save(input.archiveId, input.path)))
   ),
 
+  extractEntry: os.archive.extractEntry.handler(({ input }) =>
+    run(
+      Effect.flatMap(ArchiveService, (s) =>
+        s.extractEntry(input.archiveId, input.entryKey, input.path)
+      )
+    )
+  ),
+
+  importEntry: os.archive.importEntry.handler(({ input }) =>
+    run(
+      Effect.flatMap(ArchiveService, (s) =>
+        s.importEntry(input.archiveId, input.entryKey, input.path)
+      )
+    )
+  ),
+
   close: os.archive.close.handler(async ({ input }) => {
     await run(Effect.flatMap(ArchiveService, (s) => s.close(input.archiveId)))
     return ok

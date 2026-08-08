@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronDown,
   FileQuestion,
@@ -15,7 +15,7 @@ import {
 import type { ArchiveEntryInfo } from '@shared/contract'
 import { getClient, getOrpc } from '@renderer/lib/orpc'
 import { describeError } from '@renderer/lib/errors'
-import { reportError, reportInfo } from '@renderer/lib/toast'
+import { reportError, reportInfo, reportSuccess } from '@renderer/lib/toast'
 import { useOpenLayout } from '@renderer/lib/use-open-layout'
 import { useDocuments } from '@renderer/editor/store/document'
 import { useWorkspace } from '@renderer/editor/store/workspace'
@@ -51,6 +51,8 @@ export function ArchiveBrowser(): ReactNode {
   const setActiveArchive = useWorkspace((state) => state.setActiveArchive)
   const tabs = useDocuments((state) => state.tabs)
   const [closing, setClosing] = useState(false)
+  const [busyEntry, setBusyEntry] = useState<string | null>(null)
+  const queryClient = useQueryClient()
 
   const archive = useQuery({
     ...orpc.archive.get.queryOptions({ input: { archiveId: archiveId ?? '' } }),
@@ -80,6 +82,78 @@ export function ArchiveBrowser(): ReactNode {
         reportError(cause, { retry: closeArchive })
       } finally {
         setClosing(false)
+      }
+    })()
+  }
+
+  /**
+   * Writes an entry to a file the user picks.
+   *
+   * The way anything other than a decoded texture gets out of an archive: layouts, animations,
+   * texture containers and BYML were all readable inside the app and unreachable from outside
+   * it. The bytes are exactly what the archive holds — compression in a `.szs` wraps the whole
+   * SARC, not each entry — so what lands on disk is what the game's own loader would see.
+   */
+  const extractEntry = (entry: ArchiveEntryInfo): void => {
+    if (!archiveId) return
+    setBusyEntry(entry.key)
+    void (async () => {
+      try {
+        const client = getClient()
+        const chosen = await client.dialog.saveFileAs({
+          purpose: 'any',
+          defaultName: entry.displayName.split('/').pop() ?? entry.displayName
+        })
+        if (chosen.canceled || !chosen.path) return
+        const written = await client.archive.extractEntry({
+          archiveId,
+          entryKey: entry.key,
+          path: chosen.path
+        })
+        reportSuccess('Extracted', `${entry.displayName} written (${written.bytes} bytes).`)
+      } catch (cause) {
+        reportError(cause, { retry: () => extractEntry(entry) })
+      } finally {
+        setBusyEntry(null)
+      }
+    })()
+  }
+
+  /**
+   * Replaces an entry from a file the user picks.
+   *
+   * Also the practical route to importing a texture: doing that properly needs a BNTX writer, a
+   * BCn/ASTC compressor and a forward Tegra swizzle, none of which exist here, while swapping in
+   * a `.bntx` built elsewhere needs none of them.
+   *
+   * What arrived is reported rather than validated. Refusing bytes this build cannot parse would
+   * block the legitimate case of a format it does not model; accepting them silently would let
+   * someone leave an unreadable entry in an archive and discover it much later.
+   */
+  const importEntry = (entry: ArchiveEntryInfo): void => {
+    if (!archiveId) return
+    setBusyEntry(entry.key)
+    void (async () => {
+      try {
+        const client = getClient()
+        const chosen = await client.dialog.openFiles({ purpose: 'any' })
+        const path = chosen.paths[0]
+        if (chosen.canceled || !path) return
+        const result = await client.archive.importEntry({
+          archiveId,
+          entryKey: entry.key,
+          path
+        })
+        await queryClient.invalidateQueries({ queryKey: orpc.archive.get.key() })
+        reportSuccess(
+          'Replaced',
+          `${entry.displayName} now holds ${result.bytes} bytes (${result.detected}). ` +
+            'Save the archive to write it to disk.'
+        )
+      } catch (cause) {
+        reportError(cause, { retry: () => importEntry(entry) })
+      } finally {
+        setBusyEntry(null)
       }
     })()
   }
@@ -200,7 +274,7 @@ export function ArchiveBrowser(): ReactNode {
                 const { leaf } = splitPath(entry.displayName)
                 const selected = entry.key === selectedKey
                 return (
-                  <li key={entry.key}>
+                  <li key={entry.key} className="group/entry relative">
                     <button
                       type="button"
                       // Opening reuses the current tab; a modifier adds one.
@@ -246,11 +320,41 @@ export function ArchiveBrowser(): ReactNode {
                       {pending === entry.key ? (
                         <Loader2 className="size-3 shrink-0 animate-spin text-muted-foreground" />
                       ) : (
-                        <span className="shrink-0 text-[11px] text-muted-foreground/60">
+                        <span className="shrink-0 text-[11px] text-muted-foreground/60 group-hover/entry:opacity-0">
                           {formatSize(entry.size)}
                         </span>
                       )}
                     </button>
+                    {/*
+                      Extract and Replace, revealed on hover so they do not crowd a list of
+                      thirty thousand rows. Absolutely positioned rather than inside the row
+                      button, because a button inside a button is invalid and the row's click
+                      would swallow theirs.
+                    */}
+                    <span className="absolute right-2 top-0 hidden h-full items-center gap-1 group-hover/entry:flex">
+                      <button
+                        type="button"
+                        onClick={() => extractEntry(entry)}
+                        disabled={busyEntry !== null}
+                        title={`Write ${entry.displayName} to a file`}
+                        className="rounded border bg-background px-1 py-0.5 text-[10px] hover:bg-accent disabled:opacity-40"
+                      >
+                        Extract
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => importEntry(entry)}
+                        disabled={busyEntry !== null || !entry.named}
+                        title={
+                          entry.named
+                            ? `Replace ${entry.displayName} from a file`
+                            : 'This entry has no stored name, so it cannot be replaced'
+                        }
+                        className="rounded border bg-background px-1 py-0.5 text-[10px] hover:bg-accent disabled:opacity-40"
+                      >
+                        Replace
+                      </button>
+                    </span>
                   </li>
                 )
               })}

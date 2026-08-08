@@ -173,6 +173,51 @@ export const archiveContract = {
   save: base
     .input(z.object({ archiveId: z.string(), path: z.string().optional() }))
     .output(archiveDescriptorSchema),
+  /**
+   * Writes one entry's bytes to a file.
+   *
+   * The way anything other than a decoded texture gets *out* of an archive. Everything in one
+   * — layouts, animations, texture containers, BYML — was readable in the app and unreachable
+   * from outside it, which is most of what a user of the tool this replaces does all day.
+   */
+  extractEntry: base
+    .input(
+      z.object({
+        archiveId: z.string(),
+        entryKey: z.string().min(1),
+        path: z.string().min(1)
+      })
+    )
+    .output(z.object({ path: z.string(), bytes: z.number().int() })),
+  /**
+   * Replaces one entry's bytes from a file.
+   *
+   * Also the pragmatic answer to importing a texture. Doing that properly needs a BNTX writer,
+   * a BCn/ASTC *compressor* and a forward Tegra swizzle, none of which exist here; swapping in
+   * a `.bntx` built elsewhere needs none of them.
+   *
+   * The bytes go in uncompressed: Yaz0 or ZSTD is applied to the whole archive on save, not per
+   * entry. An entry whose name could not be recovered cannot be replaced, and says so.
+   */
+  importEntry: base
+    .input(
+      z.object({
+        archiveId: z.string(),
+        entryKey: z.string().min(1),
+        path: z.string().min(1)
+      })
+    )
+    .output(
+      z.object({
+        archive: archiveDescriptorSchema,
+        bytes: z.number().int(),
+        /**
+         * What the new bytes look like to the sniffer, so the UI can say when someone has just
+         * imported something the app cannot read — a real mistake to make silently.
+         */
+        detected: z.string()
+      })
+    ),
   close: base.input(z.object({ archiveId: z.string() })).output(okSchema)
 }
 

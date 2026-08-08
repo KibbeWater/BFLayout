@@ -2,7 +2,7 @@ import { basename } from 'node:path'
 import { Effect } from 'effect'
 
 import { FormatParseError, FormatWriteError, UnsupportedFormatError } from '@shared/binary/errors'
-import type { SupportedCompression } from '@shared/formats/compression'
+import { detectCompression, type SupportedCompression } from '@shared/formats/compression'
 import { classifyEntry } from '@shared/formats/entry-kind'
 import {
   isSarc,
@@ -213,6 +213,46 @@ export class ArchiveService extends Effect.Service<ArchiveService>()('ArchiveSer
       })
 
     /**
+     * Writes one entry's bytes to a file.
+     *
+     * Byte-for-byte what the archive holds, uncompressed — the compression in a `.szs` wraps
+     * the whole SARC, not each entry — so the result is exactly what the game's own loader
+     * would see, and re-importing it is a no-op.
+     */
+    const extractEntry = (
+      archiveId: string,
+      key: string,
+      path: string
+    ): Effect.Effect<{ path: string; bytes: number }, NotFoundError | IoError> =>
+      Effect.gen(function* () {
+        const data = yield* readEntry(archiveId, key)
+        yield* files.writeAtomic(path, data)
+        return { path, bytes: data.length }
+      })
+
+    /**
+     * Replaces one entry's bytes with the contents of a file.
+     *
+     * The new bytes are sniffed and reported rather than checked: refusing anything this build
+     * cannot parse would block the legitimate case of importing a format it does not model, and
+     * accepting it silently would let someone put an unreadable entry into an archive and only
+     * find out later. Saying what arrived leaves the judgement where it belongs.
+     */
+    const importEntry = (
+      archiveId: string,
+      key: string,
+      path: string
+    ): Effect.Effect<
+      { archive: ArchiveDescriptor; bytes: number; detected: string },
+      NotFoundError | FormatWriteError | FileNotFoundError | IoError
+    > =>
+      Effect.gen(function* () {
+        const data = yield* files.read(path)
+        const archive = yield* replaceEntry(archiveId, key, data)
+        return { archive, bytes: data.length, detected: describeBytes(data) }
+      })
+
+    /**
      * Drops an archive session.
      *
      * Refuses while it holds unsaved changes, because dropping it discards them: a layout save
@@ -252,6 +292,8 @@ export class ArchiveService extends Effect.Service<ArchiveService>()('ArchiveSer
       openPath,
       readEntry,
       replaceEntry,
+      extractEntry,
+      importEntry,
       recoverNames,
       save,
       close,
@@ -260,3 +302,18 @@ export class ArchiveService extends Effect.Service<ArchiveService>()('ArchiveSer
     } as const
   })
 }) {}
+
+/**
+ * What a blob looks like from its magic, for reporting an import back to the user.
+ *
+ * Deliberately shallow: the point is to say "that is a BFLYT" or "that is nothing I know",
+ * not to validate. A full parse here would reject files the app cannot read but the game can.
+ */
+function describeBytes(data: Uint8Array): string {
+  const compression = detectCompression(data)
+  if (compression !== 'none') return compression
+  if (data.length < 4) return 'empty'
+  const magic = String.fromCharCode(...data.subarray(0, 4))
+  if (/^[\x20-\x7e]{4}$/.test(magic)) return magic
+  return 'unrecognised'
+}
