@@ -17,7 +17,7 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | Undo / redo | Working (transform, property, material, add/delete) |
 | Add / delete pane, grid snapping | Working |
 | Session restore | Offers the previous session on launch |
-| BNTX textures | Decode and preview (BC1–BC5, ASTC LDR, uncompressed; no BC6H/BC7) |
+| BNTX textures | Decode and preview (BC1–BC5, all ASTC LDR block sizes, uncompressed; no BC6H/BC7) |
 | BFLAN animation | Parse, play, scrub, inspect keyframes (no keyframe editing) |
 | Canvas resize handles, rubber-band select, alignment guides | Working |
 | Folder / romfs browsing | Working (tree or list, lazy per directory) |
@@ -35,7 +35,7 @@ romfs dump (Switch, v1.0.4) is parsed and rewritten byte for byte:
 | SARC archives | 567 | 100% |
 | BFLYT layouts | 544 | 99.1% |
 | BFLAN animations | 2187 | 99.5% |
-| BNTX containers | 24,423 textures decoded | 100% |
+| BNTX containers | 74,480 textures decoded | 100% |
 
 See [Validating against real files](#validating-against-real-files) for how to run
 this, and what the remaining 0.9% is.
@@ -184,9 +184,11 @@ difference not yet traced. All five still save correctly through the normal path
 which replays original bytes for anything untouched; only a full re-encode from
 the model differs.
 
-**ASTC textures do not decode**, and in this game that is most of them — 96% of
-its 24,000 textures are ASTC. They are reported and drawn as a magenta checker
-rather than guessed at. BC1–BC5 and the uncompressed formats decode exactly.
+**ASTC decodes**, which in this game is most textures: 74,480 surfaces decode
+with zero errors, up from 24,423 before the decoder existed. The only formats
+left without one are `BC7` (91 textures) and `BC6H` (2). One `.bntx` is rejected
+outright — `MiiFaceMaskPos.bntx.zs` has a `"Gen "` platform header rather than
+the NX one — which is reported rather than guessed at.
 
 ### End-to-end self-test
 
