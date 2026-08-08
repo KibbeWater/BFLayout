@@ -212,8 +212,33 @@ export class ArchiveService extends Effect.Service<ArchiveService>()('ArchiveSer
         return describe(saved)
       })
 
-    const close = (archiveId: string): Effect.Effect<void> =>
-      Effect.sync(() => {
+    /**
+     * Drops an archive session.
+     *
+     * Refuses while it holds unsaved changes, because dropping it discards them: a layout save
+     * writes its re-encoded entry into *this* in-memory archive (`replaceEntry`), and nothing
+     * has reached disk until the archive itself is saved. The UI already disables its Close
+     * button for a dirty archive, but a guard that lives only in the renderer is advisory —
+     * the archive lives here, so the refusal belongs here too.
+     *
+     * `force` is for a caller that has genuinely decided to discard, which is the same thing
+     * the tab-close prompt asks about. Nothing passes it yet; it exists so that a future
+     * "close and discard" does not have to reach around this check.
+     */
+    const close = (
+      archiveId: string,
+      force = false
+    ): Effect.Effect<void, FormatWriteError> =>
+      Effect.gen(function* () {
+        const session = open.get(archiveId)
+        if (session && session.dirty && !force) {
+          return yield* Effect.fail(
+            new FormatWriteError({
+              format: 'sarc',
+              message: `${basename(session.path)} has unsaved changes; save it before closing`
+            })
+          )
+        }
         open.delete(archiveId)
       })
 

@@ -59,22 +59,47 @@ export function PropertiesPanel(): ReactNode {
   const tab = useActiveTab()
   const runCommand = useDocuments((state) => state.runCommand)
 
+  const selection = tab?.selectedPaneIds ?? []
+
+  /*
+   * The selected panes, resolved once per render rather than once per field — and above the
+   * early returns, because hooks have to run unconditionally on every render. Putting it below
+   * them is the mistake that crashed the materials panel twice; `pnpm lint`'s
+   * `react-hooks/rules-of-hooks` caught it here on the first try.
+   *
+   * `paneById` walks the tree, `shared()` calls it for every selected pane, and a dozen fields
+   * ask — while a canvas drag re-renders this panel every pointermove. A marquee of a hundred
+   * panes in a five-hundred-pane layout turned that into hundreds of thousands of comparisons
+   * per frame for nothing.
+   */
+  const selectedPanes = useMemo(() => {
+    const document = tab?.document
+    if (!document) return []
+    const found: Pane[] = []
+    for (const id of selection) {
+      const candidate = paneById(document, id)
+      if (candidate) found.push(candidate)
+    }
+    return found
+    // Keyed on the revision because the document is mutated in place, so its identity is
+    // stable across edits and cannot be a dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab?.documentId, tab?.revision, selection.join('|')])
+
   if (!tab) {
     return <Hint>Open a layout to edit pane properties.</Hint>
   }
 
-  const selectedId = tab.selectedPaneIds[0]
-  const pane = selectedId ? paneById(tab.document, selectedId) : null
+  const pane = selectedPanes[0] ?? null
 
   if (!pane) {
     return <Hint>Select a pane in the hierarchy.</Hint>
   }
 
-  const selection = tab.selectedPaneIds
   const multiple = selection.length > 1
 
   /**
-   * Every selected pane of the same kind as the active one.
+   * Every selected pane, or only those of the active pane's kind.
    *
    * Kind matters because the fields below are kind-specific past the common header: a
    * `pic1` has vertex colours a `pan1` does not, and writing them onto the wrong pane kind
@@ -86,13 +111,9 @@ export function PropertiesPanel(): ReactNode {
    * carries the child anyway.
    */
   const targets = (kindOnly: boolean): Pane[] => {
-    const found: Pane[] = []
-    for (const id of selection) {
-      const candidate = paneById(tab.document, id)
-      if (!candidate) continue
-      if (kindOnly && candidate.kind !== pane.kind) continue
-      found.push(candidate)
-    }
+    const found = kindOnly
+      ? selectedPanes.filter((candidate) => candidate.kind === pane.kind)
+      : selectedPanes
     return found.length > 0 ? found : [pane]
   }
 
@@ -147,6 +168,9 @@ export function PropertiesPanel(): ReactNode {
     return panes.every((target) => read(target) === first) ? first : undefined
   }
 
+  /** The alpha slider is a common field, so it gets the same disagreement marker. */
+  const alphaMixed = multiple && shared((target) => target.alpha) === undefined
+
   return (
     <div className="min-h-0 flex-1 overflow-auto">
       {multiple ? <ArrangeSection count={tab.selectedPaneIds.length} /> : null}
@@ -181,17 +205,22 @@ export function PropertiesPanel(): ReactNode {
             onChange={(value) => edit((target) => (target.influenceAlpha = value))}
           />
         </Row>
-        <Field label="Alpha">
+        <Field label={alphaMixed ? 'Alpha (differs)' : 'Alpha'}>
           <div className="flex items-center gap-2">
             <input
               type="range"
               min={0}
               max={255}
               value={pane.alpha}
+              title={alphaMixed ? 'The selected panes differ; dragging sets them all' : undefined}
               onChange={(event) => edit((target) => (target.alpha = Number(event.target.value)))}
               className="flex-1"
             />
-            <span className="w-8 text-right tabular-nums text-muted-foreground">
+            <span
+              className={`w-8 text-right tabular-nums ${
+                alphaMixed ? 'text-amber-500' : 'text-muted-foreground'
+              }`}
+            >
               {pane.alpha}
             </span>
           </div>

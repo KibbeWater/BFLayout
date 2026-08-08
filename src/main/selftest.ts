@@ -1165,6 +1165,42 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       .map(t => t.source.archiveId)
     const heldKept = held.every(id => afterClose.some(a => a.archiveId === id))
 
+    /*
+     * A deliberately dirty archive, because the refusal has to live in main and not only in the
+     * button. Saving a layout writes its re-encoded entry into the *in-memory* archive, so the
+     * changes exist nowhere else until the archive itself is saved — dropping the session
+     * discards them.
+     */
+    let dirtyRefused = null
+    let dirtyThenClosed = null
+    const second = await c.archive.open({ path: ${JSON.stringify(join(tmpdir(), 'bflayout-selftest-spare.szs'))} })
+    const dirtyEntry = second.entries.find(e => e.kind === 'layout')
+    if (dirtyEntry) {
+      const doc = await c.layout.open({
+        source: { kind: 'archive', archiveId: second.archiveId, entryKey: dirtyEntry.key }
+      })
+      await c.layout.save({ documentId: doc.documentId, document: doc.document })
+      await c.layout.close({ documentId: doc.documentId })
+
+      const isDirty = (await c.archive.list()).find(a => a.archiveId === second.archiveId)
+      if (isDirty && isDirty.dirty) {
+        try {
+          await c.archive.close({ archiveId: second.archiveId })
+          dirtyRefused = false
+        } catch {
+          dirtyRefused = true
+        }
+        // Saved, so it is closeable again; the spare is a temp copy, not the fixture.
+        await c.archive.save({ archiveId: second.archiveId })
+        try {
+          await c.archive.close({ archiveId: second.archiveId })
+          dirtyThenClosed = true
+        } catch {
+          dirtyThenClosed = false
+        }
+      }
+    }
+
     let refused = null
     if (held.length > 0) {
       dev.workspace.getState().setActiveArchive(held[0])
@@ -1180,6 +1216,8 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       closed: !afterClose.some(a => a.archiveId === spare.archiveId),
       heldKept,
       refused,
+      dirtyRefused,
+      dirtyThenClosed,
       held: held.length
     }
   })()`)) as {
@@ -1188,6 +1226,8 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
         closed?: boolean
         heldKept?: boolean
         refused?: boolean | null
+        dirtyRefused?: boolean | null
+        dirtyThenClosed?: boolean | null
         held?: number
       })
     : null
@@ -1203,6 +1243,19 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       closeArchive.heldKept === true,
       `closing one archive left the ${closeArchive.held} behind open tabs alone`
     )
+    if (closeArchive.dirtyRefused === null) {
+      out.push('SKIP dirty archive close refusal (no dirty archive at this point)')
+    } else {
+      check(
+        closeArchive.dirtyRefused === true,
+        'main refuses to close an archive holding unsaved changes'
+      )
+      // And the refusal has to lift once the changes are on disk, or it is a trap.
+      check(
+        closeArchive.dirtyThenClosed === true,
+        'the same archive closes once it has been saved'
+      )
+    }
     if (closeArchive.refused === null) {
       out.push('SKIP archive close refusal (no archive-backed tab)')
     } else {

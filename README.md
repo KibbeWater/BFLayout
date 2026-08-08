@@ -368,7 +368,8 @@ on a parent and its child is a meaningful request; a move is the case where the 
 carries the child anyway.
 
 A common field whose selected panes disagree says so: numbers and dropdowns show an amber
-dot, checkboxes go indeterminate. The value shown is still the active pane's — blanking it
+dot, checkboxes go indeterminate, and the alpha slider labels itself "differs". The value shown
+is still the active pane's — blanking it
 would throw away the one piece of information available — but a field quietly showing one
 pane's number while eleven others hold something else invites an overwrite nobody intended.
 The kind-specific fields below do not carry the marker yet; they apply only to panes sharing
@@ -390,10 +391,18 @@ because the session snapshot is rebuilt from the list of open archives it also r
 saved session to drop that archive for good. Restore would have quietly degraded its own
 snapshot.
 
-So it is an explicit **Close** in the archive browser, which refuses while the archive has
-unsaved changes or while any open tab holds a layout from it — that tab's save writes its
-re-encoded entry back into this in-memory archive, and save-as is not available for an
-archive-backed layout. A button cannot be wrong about intent.
+So it is an explicit **Close** in the archive browser, which refuses while any open tab holds a
+layout from it — that tab's save writes its re-encoded entry back into this in-memory archive,
+and save-as is not available for an archive-backed layout. A button cannot be wrong about
+intent.
+
+The unsaved-changes refusal lives in **main**, not in the button. A layout save writes its
+re-encoded entry into the in-memory archive, so those changes exist nowhere else until the
+archive itself is saved — dropping the session discards them. A guard in the renderer is
+advisory: the disabled state is computed from cached query data, and a save whose second step
+failed leaves that cache saying `dirty: false` while the archive genuinely is. The archive
+lives in main, so the refusal does too, and the end-to-end pass makes one dirty on purpose to
+check both directions — refused while dirty, closeable once saved.
 
 ### Where a keystroke goes
 
