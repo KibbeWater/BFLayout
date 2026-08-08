@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   ChevronDown,
@@ -13,10 +13,11 @@ import {
 } from 'lucide-react'
 
 import type { ArchiveEntryInfo } from '@shared/contract'
-import { getOrpc } from '@renderer/lib/orpc'
+import { getClient, getOrpc } from '@renderer/lib/orpc'
 import { describeError } from '@renderer/lib/errors'
-import { reportInfo } from '@renderer/lib/toast'
+import { reportError, reportInfo } from '@renderer/lib/toast'
 import { useOpenLayout } from '@renderer/lib/use-open-layout'
+import { useDocuments } from '@renderer/editor/store/document'
 import { useWorkspace } from '@renderer/editor/store/workspace'
 
 const KIND_ICON: Record<ArchiveEntryInfo['kind'], ReactNode> = {
@@ -47,11 +48,41 @@ export function ArchiveBrowser(): ReactNode {
   const selectedKey = useWorkspace((state) => state.selectedEntryKey)
   const selectEntry = useWorkspace((state) => state.selectEntry)
   const { openLayout, pending } = useOpenLayout()
+  const setActiveArchive = useWorkspace((state) => state.setActiveArchive)
+  const tabs = useDocuments((state) => state.tabs)
+  const [closing, setClosing] = useState(false)
 
   const archive = useQuery({
     ...orpc.archive.get.queryOptions({ input: { archiveId: archiveId ?? '' } }),
     enabled: archiveId !== null
   })
+
+  /**
+   * Closes the archive being browsed.
+   *
+   * Refused while a tab still holds a layout from it: that tab's save writes the re-encoded
+   * entry back into this in-memory archive, so closing it first would leave the save failing
+   * with nothing to write into and no save-as available for an archive-backed layout. Refused
+   * too while it has unsaved changes, which is the same hazard one step earlier.
+   */
+  const openFromHere = tabs.filter(
+    (tab) => tab.source.kind === 'archive' && tab.source.archiveId === archiveId
+  )
+
+  const closeArchive = (): void => {
+    if (!archiveId) return
+    setClosing(true)
+    void (async () => {
+      try {
+        await getClient().archive.close({ archiveId })
+        setActiveArchive(null)
+      } catch (cause) {
+        reportError(cause, { retry: closeArchive })
+      } finally {
+        setClosing(false)
+      }
+    })()
+  }
 
   const groups = useMemo(() => {
     const entries = archive.data?.entries ?? []
@@ -106,9 +137,40 @@ export function ArchiveBrowser(): ReactNode {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="border-b px-3 py-2">
-        <p className="truncate font-medium" title={data.path}>
-          {data.displayName}
-        </p>
+        <div className="flex items-start gap-2">
+          <p className="min-w-0 flex-1 truncate font-medium" title={data.path}>
+            {data.displayName}
+          </p>
+          {/*
+            Closing an archive is explicit, and deliberately so.
+            
+            Nothing used to close one at all, so every archive opened stayed open for the
+            session — which is not merely a leak: resolving a texture searches the layout's own
+            archive and then every other open one, so the list only grew and a stale archive
+            could keep answering with a same-named texture.
+            
+            Reclaiming them automatically was tried and reverted. "Referenced" is not
+            knowable: opening an archive *so that its textures resolve* is a documented
+            workflow, and once the browser moves on it looks exactly like an abandoned one — so
+            a sweep silently un-textured panes, and rewrote the saved session to drop the
+            archive for good. A button the user presses cannot be wrong about intent.
+          */}
+          <button
+            type="button"
+            onClick={closeArchive}
+            disabled={closing || data.dirty || openFromHere.length > 0}
+            title={
+              data.dirty
+                ? 'This archive has unsaved changes; save it before closing'
+                : openFromHere.length > 0
+                  ? `${openFromHere.length} open layout${openFromHere.length === 1 ? '' : 's'} still come from this archive; close ${openFromHere.length === 1 ? 'it' : 'them'} first`
+                  : 'Close this archive and free its memory'
+            }
+            className="shrink-0 rounded border px-1.5 py-0.5 text-[11px] hover:bg-accent disabled:opacity-40"
+          >
+            Close
+          </button>
+        </div>
         <p className="mt-0.5 text-[11px] text-muted-foreground">
           {data.entries.length} files · {data.compression === 'none' ? 'uncompressed' : data.compression.toUpperCase()}
           {data.littleEndian ? '' : ' · big-endian'}

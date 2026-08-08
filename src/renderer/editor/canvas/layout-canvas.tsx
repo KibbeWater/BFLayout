@@ -11,7 +11,7 @@ import {
 
 import type { LayoutDocument, Pane, PartPane } from '@shared/formats/bflyt'
 import { walkPanes } from '@shared/formats/bflyt'
-import type { LayoutSource } from '@shared/contract'
+import type { AppSettings, LayoutSource } from '@shared/contract'
 import {
   apply,
   flattenPanes,
@@ -563,38 +563,42 @@ export function LayoutCanvas(): ReactNode {
   const snap = settings.data?.snapToGuides ?? true
 
   /*
-   * The intended values, tracked in refs alongside the query.
-   *
-   * Two problems that both come from these living in settings rather than in component
-   * state, and both are invisible until you use the menu:
+   * Toggling a setting, without the two failures that come from these living in settings
+   * rather than in component state.
    *
    *   - The View menu handler is registered once at mount with no deps, so a plain
    *     `!showGrid` captured the *first* render's value — and on the first render
    *     `settings.data` is still undefined, so the closure read `true` forever and Toggle
    *     Grid could only ever turn the grid off. The toolbar button got a fresh closure each
    *     render and still worked, which made it look intermittent.
-   *   - `patch` only changes what the query reports after the mutation lands and the query
+   *   - `patch` only changes what the query reports once the mutation lands and the query
    *     refetches, so two quick clicks both read the same stale value and land on the same
-   *     state — a lost update the functional updater this replaced could not have.
+   *     state.
    *
-   * A ref updated at the moment of the click fixes both: it is always current, and it does
-   * not wait for a round trip.
+   * Writing the new value into the query cache immediately fixes both, and does it in one
+   * place: `showGrid` below is correct on the very next render, so the menu's stable closure
+   * reads it through a ref that an effect keeps in step, and a second click sees the first
+   * one. An earlier attempt assigned that ref during render instead — which React 19 does not
+   * support, and which reset it to the stale query value on the re-render the mutation itself
+   * causes, reproducing the lost update it was meant to fix.
    */
+  const settingsKey = orpc.app.settings.get.key()
+  const toggleSetting = (field: 'showGrid' | 'snapToGuides', next: boolean): void => {
+    queryClient.setQueryData(settingsKey, (current: AppSettings | undefined) =>
+      current ? { ...current, [field]: next } : current
+    )
+    patchSettings.mutate({ [field]: next })
+  }
+
   const showGridRef = useRef(showGrid)
   const snapRef = useRef(snap)
-  showGridRef.current = showGrid
-  snapRef.current = snap
+  useEffect(() => {
+    showGridRef.current = showGrid
+    snapRef.current = snap
+  }, [showGrid, snap])
 
-  const toggleGrid = (): void => {
-    const next = !showGridRef.current
-    showGridRef.current = next
-    patchSettings.mutate({ showGrid: next })
-  }
-  const toggleSnap = (): void => {
-    const next = !snapRef.current
-    snapRef.current = next
-    patchSettings.mutate({ snapToGuides: next })
-  }
+  const toggleGrid = (): void => toggleSetting('showGrid', !showGridRef.current)
+  const toggleSnap = (): void => toggleSetting('snapToGuides', !snapRef.current)
 
   /**
    * One renderer per canvas element, created by a ref callback rather than an

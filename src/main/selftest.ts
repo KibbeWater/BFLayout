@@ -972,6 +972,16 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     if (siblings.length < 2) return { skipped: 'need two sibling panes' }
 
     const ids = siblings.map(p => p.id)
+    /*
+     * Captured *before* the edit, and as numbers rather than as pane references.
+     *
+     * The first version of this read the originals from the live panes after undoing, which
+     * meant comparing an object's field to itself — the assertion held whatever undo had
+     * actually done, including restoring the wrong value. The document is mutated in place,
+     * so a reference is not a snapshot.
+     */
+    const original = siblings.map(p => p.width)
+
     store.select(ids)
     await new Promise(r => setTimeout(r, 350))
 
@@ -1024,7 +1034,6 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       return hit
     }
     const back = ids.map(id => findIn(restored.document, id).width)
-    const original = siblings.map(p => p.width)
 
     return {
       count: ids.length,
@@ -1046,72 +1055,90 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
-   * Sessions that nothing refers to get released.
+   * Closing an archive is possible, and refuses when it would break something.
    *
-   * `archive.close` and `animation.close` were implemented and called by nothing. For
-   * animations that is a plain leak — clicking through a folder of them retained a parsed
-   * document each time. For archives it is worse than a leak: resolving a texture searches
-   * every open archive, so an archive nobody refers to keeps making lookups slower and keeps
-   * being able to answer with a same-named texture from a file whose tab was closed long ago.
+   * Nothing used to close one at all, so every archive opened stayed open for the session —
+   * and because resolving a texture searches every open archive, the list only grew and a
+   * stale archive could keep answering with a same-named texture.
+   *
+   * Reclaiming them automatically was tried and reverted, which is worth recording: an
+   * archive opened *so that its textures resolve* is a documented workflow and, once the
+   * browser moves on, looks exactly like an abandoned one. A sweep therefore un-textured
+   * panes silently, and — because the session snapshot is rebuilt from the list of open
+   * archives — rewrote the saved session to drop the archive permanently. So it is a button
+   * now, and what is testable is that it works and that it declines when a layout still needs
+   * the archive.
    */
-  // A copy under a second path, so the reconciler has something to close that no tab,
-  // no browser view and no animation refers to.
+  // A copy under a second path, so there is something to close that no tab needs.
   const spareArchive = join(tmpdir(), 'bflayout-selftest-spare.szs')
   const spareReady = await copyFile(process.env['BFLAYOUT_SELFTEST_ARCHIVE'] ?? '', spareArchive)
     .then(() => true)
     .catch(() => false)
 
-  const sessions2 = spareReady
+  const closeArchive = spareReady
     ? ((await win.webContents.executeJavaScript(`(async () => {
     const c = window.__bfclient
     const dev = window.__bfdev
 
-    /*
-     * A *different path*, because openPath dedupes on path: opening the fixture again
-     * returned the very archive the open tab refers to, so the check could never observe a
-     * close and passed nothing.
-     */
     const spare = await c.archive.open({ path: ${JSON.stringify(join(tmpdir(), 'bflayout-selftest-spare.szs'))} })
-    const before = (await c.archive.list()).length
+    const opened = (await c.archive.list()).length
 
-    // Nudge the stores so the reconciler runs, then wait past its settle delay.
-    dev.documents.getState().setActive(dev.documents.getState().activeId)
-    await new Promise(r => setTimeout(r, 3500))
+    await c.archive.close({ archiveId: spare.archiveId })
+    const afterClose = await c.archive.list()
 
-    const after = await c.archive.list()
-    const stillOpen = after.map(a => a.archiveId)
-    const tabIds = dev.documents.getState().tabs
+    // The archive behind a live tab must survive, and the UI has to refuse to close it.
+    const store = dev.documents.getState()
+    const held = store.tabs
       .filter(t => t.source.kind === 'archive')
       .map(t => t.source.archiveId)
+    const heldKept = held.every(id => afterClose.some(a => a.archiveId === id))
+
+    let refused = null
+    if (held.length > 0) {
+      dev.workspace.getState().setActiveArchive(held[0])
+      const tab = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'archive')
+      if (tab) { tab.click(); await new Promise(r => setTimeout(r, 400)) }
+      const button = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Close')
+      refused = button ? button.disabled : null
+    }
 
     return {
-      before,
-      after: after.length,
-      spareClosed: !stillOpen.includes(spare.archiveId),
-      // The archive behind an open tab must never be dropped.
-      tabsKept: tabIds.every(id => stillOpen.includes(id)),
-      tabs: tabIds.length
+      opened,
+      after: afterClose.length,
+      closed: !afterClose.some(a => a.archiveId === spare.archiveId),
+      heldKept,
+      refused,
+      held: held.length
     }
   })()`)) as {
-        before?: number
+        opened?: number
         after?: number
-        spareClosed?: boolean
-        tabsKept?: boolean
-        tabs?: number
+        closed?: boolean
+        heldKept?: boolean
+        refused?: boolean | null
+        held?: number
       })
     : null
 
-  if (!sessions2) {
-    out.push('SKIP archive session reconciliation (no fixture archive to copy)')
+  if (!closeArchive) {
+    out.push('SKIP archive close (no fixture archive to copy)')
   } else {
     check(
-      sessions2.spareClosed === true,
-      `an archive nothing refers to is released (${sessions2.before} -> ${sessions2.after} open)`
+      closeArchive.closed === true,
+      `an archive can be closed (${closeArchive.opened} -> ${closeArchive.after} open)`
     )
     check(
-      sessions2.tabsKept === true,
-      `archives behind open tabs are kept (${sessions2.tabs} tab(s))`
+      closeArchive.heldKept === true,
+      `closing one archive left the ${closeArchive.held} behind open tabs alone`
     )
+    if (closeArchive.refused === null) {
+      out.push('SKIP archive close refusal (no archive-backed tab)')
+    } else {
+      check(
+        closeArchive.refused === true,
+        'the Close button refuses while a layout from that archive is open'
+      )
+    }
   }
 
   /*
@@ -1311,10 +1338,15 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     await c.layout.close({ documentId: opened.documentId })
     if (!chain) return { error: 'could not resolve ' + names[0] + ': ' + failure }
 
-    // Registering with the document is what actually lets the canvas use them.
+    /*
+     * Registered under a test-only family prefix. The canvas scopes its own family names by
+     * font archive so two dumps cannot collide, and duplicating that scheme here would test
+     * the copy rather than the thing; what this check is for is that the *chain* decodes and
+     * that each face is loadable by the browser at all.
+     */
     const registered = []
     for (const face of chain.faces) {
-      const family = 'bflayout-' + face.name
+      const family = 'bflayout-selftest-' + face.name
       const bytes = await face.sfnt.arrayBuffer()
       const font = new FontFace(family, bytes)
       await font.load()
@@ -1328,7 +1360,7 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     const sample = 'Wg0123'
     context.font = '32px sans-serif'
     const fallbackWidth = context.measureText(sample).width
-    context.font = '32px ' + JSON.stringify('bflayout-' + main.name) + ', sans-serif'
+    context.font = '32px ' + JSON.stringify('bflayout-selftest-' + main.name) + ', sans-serif'
     const gameWidth = context.measureText(sample).width
 
     return {

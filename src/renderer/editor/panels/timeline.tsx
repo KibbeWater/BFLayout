@@ -140,11 +140,16 @@ function AnimationRow({
   const openIt = (): void => {
     setLoading(true)
     void (async () => {
-      // Whatever was loaded is about to be replaced, so its main-process session goes with
-      // it. Read before the await, because the store moves once the new one lands.
-      const previous = usePlayback.getState().animationId
       try {
         const opened = await getClient().animation.open({ source, key: candidate.key })
+
+        /*
+         * Read immediately before the load, with no await in between, so it is whatever is
+         * genuinely being replaced. Reading it before the *fetch* looked equivalent and was
+         * not: two quick clicks both captured the same id, so one session was closed twice
+         * and the other was never closed at all.
+         */
+        const replaced = usePlayback.getState().animationId
         load({
           animationId: opened.animationId,
           displayName: opened.displayName,
@@ -153,14 +158,13 @@ function AnimationRow({
         })
 
         /*
-         * Released only after the new one is loaded, and never if it is the same session.
          * Clicking through a folder of animations to find the right one is the ordinary way
          * to use this panel, and each click used to retain a parsed document in main for the
          * rest of the session.
          */
-        if (previous && previous !== opened.animationId) {
+        if (replaced && replaced !== opened.animationId) {
           void getClient()
-            .animation.close({ animationId: previous })
+            .animation.close({ animationId: replaced })
             .catch((detail: unknown) =>
               console.warn('[bflayout] could not release an animation:', detail)
             )

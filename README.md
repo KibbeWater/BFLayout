@@ -358,10 +358,12 @@ Descendants are deliberately *not* excluded the way they are for a move. Setting
 on a parent and its child is a meaningful request; a move is the case where the parent
 carries the child anyway.
 
-A field whose selected panes disagree shows an amber dot. It still displays the active
-pane's value — blanking it would throw away the one piece of information available — but
-says so, because a field quietly showing one pane's number while eleven others hold
-something else invites an overwrite nobody intended.
+A common field whose selected panes disagree says so: numbers and dropdowns show an amber
+dot, checkboxes go indeterminate. The value shown is still the active pane's — blanking it
+would throw away the one piece of information available — but a field quietly showing one
+pane's number while eleven others hold something else invites an overwrite nobody intended.
+The kind-specific fields below do not carry the marker yet; they apply only to panes sharing
+the active pane's kind, which is a smaller set to be surprised by.
 
 ### Where a keystroke goes
 

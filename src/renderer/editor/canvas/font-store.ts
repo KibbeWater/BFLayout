@@ -53,15 +53,48 @@ const entries = new Map<string, Entry>()
 /** How long a failure is remembered before another lookup is allowed. */
 const FAILURE_TTL_MS = 30_000
 
+/**
+ * The font archive each layout source resolved to, learned from the first lookup.
+ *
+ * This is what makes the cache key the *dump* rather than the layout. Before the first
+ * lookup the archive is unknown, so the source stands in; afterwards every other layout in
+ * the same dump resolves to the same font archive and shares its entries instead of
+ * refetching multi-megabyte typefaces per layout archive.
+ */
+const originToArchive = new Map<string, string>()
+
+function originOf(source: LayoutSource): string {
+  return source.kind === 'file' ? source.path : source.archiveId
+}
+
 function cacheKey(source: LayoutSource, name: string): string {
-  // The archive path or the file path: both identify the dump closely enough, and neither
-  // changes while a layout is open.
-  const origin = source.kind === 'file' ? source.path : source.archiveId
-  return `${origin}\u0000${name}`
+  const origin = originOf(source)
+  return `${originToArchive.get(origin) ?? origin}\u0000${name}`
 }
 
 /** Prefix, so a game face can never collide with a font the user has installed. */
 const FAMILY_PREFIX = 'bflayout-'
+
+/**
+ * A family name, scoped to the archive the face came from.
+ *
+ * Scoping the *cache* by dump is not enough on its own: face names inside a complex
+ * (`ninP_SeuratCapie-EB_003`) are exactly as conventional as the `.fcpx` name that points at
+ * them, so a registry keyed on the bare face name meant the second game's face was found
+ * already registered, never fetched, and its panes drew in the first game's typeface — the
+ * same bug one level down.
+ *
+ * A short hash keeps the family readable and stable; collisions between two archive paths
+ * would only cost the same confusion at astronomically lower odds, and paths are stable within
+ * a session.
+ */
+function familyFor(archive: string, face: string): string {
+  let hash = 2166136261
+  for (let at = 0; at < archive.length; at++) {
+    hash = ((hash ^ archive.charCodeAt(at)) * 16777619) >>> 0
+  }
+  return `${FAMILY_PREFIX}${hash.toString(36)}-${face}`
+}
 
 export class FontStore {
   private readonly onChanged: () => void
@@ -111,12 +144,27 @@ export class FontStore {
   }
 
   private async load(name: string, source: LayoutSource): Promise<void> {
+    /*
+     * The key the pending marker went under, which is not necessarily the key the result
+     * belongs under: learning the font archive changes what `cacheKey` returns for this
+     * source. Without removing the old one a stale `pending` entry would sit there forever
+     * and every later ask for this name would return the fallback and never refetch.
+     */
+    const pendingKey = cacheKey(source, name)
+    const settle = (entry: Entry): void => {
+      const key = cacheKey(source, name)
+      if (key !== pendingKey) entries.delete(pendingKey)
+      entries.set(key, entry)
+    }
+
     try {
       const chain = await getClient().fonts.chain({ source, name })
-      const families: string[] = []
+      // Learned now, so every other layout in this dump shares these entries.
+      if (chain.archive) originToArchive.set(originOf(source), chain.archive)
 
+      const families: string[] = []
       for (const face of chain.faces) {
-        const family = `${FAMILY_PREFIX}${face.name}`
+        const family = familyFor(chain.archive, face.name)
         // Already registered by another layout, or another pane a moment ago.
         if (registered.has(family)) {
           families.push(family)
@@ -131,7 +179,7 @@ export class FontStore {
       }
 
       const usable = families.length > 0
-      entries.set(cacheKey(source, name), {
+      settle({
         state: usable ? 'ready' : 'missing',
         families,
         detail: usable
@@ -148,7 +196,7 @@ export class FontStore {
        * which is not a problem with the layout and not something the user can act on — the
        * canvas simply draws text in the fallback font, as it did before any of this existed.
        */
-      entries.set(cacheKey(source, name), {
+      settle({
         state: 'missing',
         families: [],
         detail: cause instanceof Error ? cause.message : String(cause),

@@ -27,19 +27,25 @@ const ORIGIN_Y = ['Top', 'Center', 'Bottom']
  * Text alignment packs two axes into one byte: bits 0-1 horizontal, bits 2-3 vertical.
  *
  * Edited as two selects over the packed value rather than exposed as a number, and written
- * with a mask so the bits above the two axes survive. `0` means "inherit from the material"
- * in both axes, which is what most shipped panes use, so it is offered rather than folded
- * into Left/Top.
+ * with a mask so the bits above the two axes survive.
+ *
+ * The order is **Center, Left/Top, Right/Bottom** — 0 is centred, not "inherit" — which
+ * matches the rasteriser and is measured rather than assumed: across the 1,000 text panes in
+ * the dump each axis only ever holds 0, 1 or 2, with 0 much the commonest (659 of them). An
+ * earlier version of this list offered a fourth "Center" entry that wrote **3**, a value no
+ * shipped pane uses and whose runtime behaviour is therefore unknown, while displaying every
+ * genuinely centred pane as "Inherit".
  */
-const TEXT_H_ALIGN = ['Inherit', 'Left', 'Right', 'Center']
-const TEXT_V_ALIGN = ['Inherit', 'Top', 'Bottom', 'Center']
+const TEXT_H_ALIGN = ['Center', 'Left', 'Right']
+const TEXT_V_ALIGN = ['Center', 'Top', 'Bottom']
 
 /**
  * Bits in a text pane's `flags` word that this build understands.
  *
- * Edited individually and never as a word. Shipped files set bits past these, and clearing
- * an unmodelled bit on save was a real bug once — the codec now preserves them, and this
- * keeps the UI from undoing that.
+ * Edited individually and never as a word, which is not a theoretical precaution: bit 2 is
+ * set on 752 of the 1,000 text panes in the dump and nothing here knows what it means.
+ * Clearing an unmodelled bit on save was a real bug once — the codec preserves them now, and
+ * masking here keeps the UI from undoing that.
  */
 const TEXT_FLAG_SHADOW = 1 << 0
 const TEXT_FLAG_RESTRICTED = 1 << 1
@@ -165,11 +171,13 @@ export function PropertiesPanel(): ReactNode {
           <Toggle
             label="Visible"
             checked={pane.visible}
+            mixed={shared((target) => target.visible) === undefined}
             onChange={(value) => edit((target) => (target.visible = value))}
           />
           <Toggle
             label="Influence alpha"
             checked={pane.influenceAlpha}
+            mixed={shared((target) => target.influenceAlpha) === undefined}
             onChange={(value) => edit((target) => (target.influenceAlpha = value))}
           />
         </Row>
@@ -252,12 +260,14 @@ export function PropertiesPanel(): ReactNode {
             label="Origin X"
             options={ORIGIN_X}
             value={pane.origin.x}
+            mixed={shared((target) => target.origin.x) === undefined}
             onChange={(value) => edit((target) => (target.origin.x = value))}
           />
           <Select
             label="Origin Y"
             options={ORIGIN_Y}
             value={pane.origin.y}
+            mixed={shared((target) => target.origin.y) === undefined}
             onChange={(value) => edit((target) => (target.origin.y = value))}
           />
         </Row>
@@ -266,12 +276,14 @@ export function PropertiesPanel(): ReactNode {
             label="Parent origin X"
             options={ORIGIN_X}
             value={pane.origin.parentX}
+            mixed={shared((target) => target.origin.parentX) === undefined}
             onChange={(value) => edit((target) => (target.origin.parentX = value))}
           />
           <Select
             label="Parent origin Y"
             options={ORIGIN_Y}
             value={pane.origin.parentY}
+            mixed={shared((target) => target.origin.parentY) === undefined}
             onChange={(value) => edit((target) => (target.origin.parentY = value))}
           />
         </Row>
@@ -1297,11 +1309,14 @@ function Select({
   label,
   options,
   value,
+  mixed = false,
   onChange
 }: {
   label?: string
   options: readonly string[] | readonly SelectOption[]
   value: number
+  /** The selected panes disagree; see NumberField. */
+  mixed?: boolean
   onChange: (value: number) => void
 }): ReactNode {
   const resolved: readonly SelectOption[] = options.map((option, index) =>
@@ -1316,7 +1331,14 @@ function Select({
   return (
     <label className="min-w-0 flex-1">
       {label ? (
-        <span className="mb-0.5 block truncate text-[11px] text-muted-foreground">{label}</span>
+        <span className="mb-0.5 flex items-center gap-1 truncate text-[11px] text-muted-foreground">
+          <span className="truncate">{label}</span>
+          {mixed ? (
+            <span title="The selected panes differ; editing sets them all" className="text-amber-500">
+              •
+            </span>
+          ) : null}
+        </span>
       ) : null}
       <select
         value={value}
@@ -1336,17 +1358,27 @@ function Select({
 function Toggle({
   label,
   checked,
+  mixed = false,
   onChange
 }: {
   label: string
   checked: boolean
+  /** The selected panes disagree; see NumberField for why this is shown rather than blanked. */
+  mixed?: boolean
   onChange: (value: boolean) => void
 }): ReactNode {
   return (
-    <label className="flex flex-1 items-center gap-1.5">
+    <label
+      className="flex flex-1 items-center gap-1.5"
+      title={mixed ? 'The selected panes differ; editing sets them all' : undefined}
+    >
       <input
         type="checkbox"
         checked={checked}
+        // Indeterminate is exactly what a disagreeing checkbox means, and browsers draw it.
+        ref={(node) => {
+          if (node) node.indeterminate = mixed
+        }}
         onChange={(event) => onChange(event.target.checked)}
       />
       <span className="truncate text-[11px] text-muted-foreground">{label}</span>

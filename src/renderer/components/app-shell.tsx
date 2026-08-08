@@ -2,15 +2,12 @@ import { useEffect, type ReactNode } from 'react'
 
 import { useAutosave } from '@renderer/lib/use-autosave'
 import { useOpenFile } from '@renderer/lib/use-open-file'
-import { useArchiveSessions } from '@renderer/lib/use-archive-sessions'
 import { useSave } from '@renderer/lib/use-save'
 import { useUnsavedGuard } from '@renderer/lib/use-unsaved-guard'
 import { ErrorBoundary } from './error-boundary'
 
 export function AppShell({ children }: { children: ReactNode }): ReactNode {
   useGlobalCommands()
-  // Frees archive sessions nothing refers to; see the hook for why it is centralised.
-  useArchiveSessions()
   // Recovery snapshots follow the documents, not the route.
   useAutosave()
 

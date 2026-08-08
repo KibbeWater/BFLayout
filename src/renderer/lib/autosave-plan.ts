@@ -122,9 +122,13 @@ export function planAutosave(
  * recently". A tab with thirty edits from an hour ago would win over one with three fresh
  * ones, forever, and the fresh tab's work would simply never be protected.
  *
- * So the tab that was written last keeps the row while it is still dirty, and otherwise the
- * turn passes. Rotating rather than fixing on one tab means neither is starved: whichever
- * has changed since its last write is the one that gets written next.
+ * So the turn passes to whichever tab has changed since it was last written. That is enough
+ * for the common shape — edit one tab, then the other — but it is worth being honest about the
+ * limit: if *both* keep changing every pass, the first in tab order keeps winning and the
+ * second's edits are never written. One row per file cannot protect two diverging documents,
+ * and the alternative (a row per tab) would mean offering the user two recoveries of one file
+ * with no way to tell them apart. Rotating on change is the best available compromise, not a
+ * guarantee.
  */
 function pickDirty(
   group: readonly AutosaveTab[],
@@ -133,11 +137,13 @@ function pickDirty(
   const dirty = group.filter((tab) => tab.unsaved)
   if (dirty.length <= 1) return dirty[0]
 
-  // Anything that has changed since it was last written goes first.
+  // Anything that has changed since it was last written goes first, and a tab other than the
+  // one just written is preferred among those, so the turn actually moves.
   const changed = dirty.filter(
     (tab) => !last || tab.documentId !== last.documentId || tab.revision !== last.revision
   )
-  return (changed[0] ?? dirty[0])!
+  const other = changed.find((tab) => !last || tab.documentId !== last.documentId)
+  return (other ?? changed[0] ?? dirty[0])!
 }
 
 /**
