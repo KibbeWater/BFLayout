@@ -1047,7 +1047,13 @@ export function LayoutCanvas(): ReactNode {
      * repeatedly never walks down the stack.
      */
     const cycle = cycleRef.current
-    if (cycle) {
+    /*
+     * Only a gesture that was *about* the selection updates the cycle. A pan, a marquee
+     * or a right-click ends here too, and letting one of those mark the cycle clicked
+     * meant a later press back at the old point skipped a level of the stack for no
+     * reason the user could see.
+     */
+    if (cycle && (drag || finishedMarquee === null) && !panRef.current) {
       const moved = drag
         ? [...drag.origins].some(([id, origin]) => {
             const pane = findById(tab?.document.rootPane ?? null, id)

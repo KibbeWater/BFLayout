@@ -1768,8 +1768,15 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     }
     await c.layout.close({ documentId: restored.documentId })
 
-    // Saving clears it: the file on disk is then the better copy.
-    dev.documents.getState().markSaved(tab.documentId)
+    /*
+     * Actually saved, not just flagged. Calling markSaved alone left the live document
+     * claiming to match a file it had never been written to, which every later check then
+     * inherited. For an archive entry this writes into the in-memory archive and touches
+     * no file, so it stays safe while exercising the real path.
+     */
+    const live = dev.documents.getState().tabs.find(t => t.documentId === tab.documentId)
+    await c.layout.save({ documentId: live.documentId, document: live.document })
+    dev.documents.getState().markSaved(live.documentId, live.revision)
     let after = listed
     for (let i = 0; i < 60 && after.length > 0; i++) {
       await new Promise(r => setTimeout(r, 250))
