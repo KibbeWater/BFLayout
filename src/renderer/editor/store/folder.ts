@@ -53,6 +53,26 @@ interface FolderStore {
   previewing: LayoutSource | null
   openPreview: (source: LayoutSource) => void
   closePreview: () => void
+
+  /**
+   * Which directories are expanded, and how many children each is showing.
+   *
+   * Here rather than in the tree components because the sidebar renders one tab at a time — so
+   * switching to Archive and back **unmounted** the whole browser and took every expanded
+   * directory, the filter and the paging with it. After walking six levels into a dump, glancing
+   * at another tab meant walking back down. Navigation position survived because it already lived
+   * here; the shape of the tree did not.
+   *
+   * Keyed by absolute path, so it is stable across remounts and across navigation.
+   */
+  expanded: Record<string, boolean>
+  toggleExpanded: (path: string) => void
+  /** Children rendered per directory, for the "show more" paging on enormous folders. */
+  shownChildren: Record<string, number>
+  setShownChildren: (path: string, count: number) => void
+  /** The list-mode filter, which is per directory: a filter for one folder means nothing in another. */
+  filters: Record<string, string>
+  setFilter: (path: string, value: string) => void
   showArchiveTab: () => void
 }
 
@@ -79,7 +99,21 @@ export const useFolder = create<FolderStore>((set, get) => ({
     set({ path: previous, history: history.slice(0, -1) })
   },
 
-  close: () => set({ rootPath: null, path: null, history: [], bymlPath: null, previewing: null }),
+  /*
+   * Closing the folder forgets the tree as well as the location. A different dump has different
+   * directories, so carrying expansion state across would be remembering paths that no longer exist.
+   */
+  close: () =>
+    set({
+      rootPath: null,
+      path: null,
+      history: [],
+      bymlPath: null,
+      previewing: null,
+      expanded: {},
+      shownChildren: {},
+      filters: {}
+    }),
 
   setTab: (tab) => set({ tab }),
 
@@ -91,6 +125,17 @@ export const useFolder = create<FolderStore>((set, get) => ({
   previewing: null,
   openPreview: (previewing) => set({ previewing, bymlPath: null }),
   closePreview: () => set({ previewing: null }),
+
+  expanded: {},
+  toggleExpanded: (path) =>
+    set((state) => ({ expanded: { ...state.expanded, [path]: !state.expanded[path] } })),
+
+  shownChildren: {},
+  setShownChildren: (path, count) =>
+    set((state) => ({ shownChildren: { ...state.shownChildren, [path]: count } })),
+
+  filters: {},
+  setFilter: (path, value) => set((state) => ({ filters: { ...state.filters, [path]: value } })),
 
   showArchiveTab: () => set({ tab: 'archive' })
 }))

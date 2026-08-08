@@ -224,7 +224,19 @@ function DirectoryNode({
   defaultOpen?: boolean
 }): ReactNode {
   const orpc = getOrpc()
-  const [open, setOpen] = useState(defaultOpen)
+  /*
+   * Expansion and paging live in the store, not here.
+   *
+   * The sidebar renders one tab at a time, so switching to Archive and back unmounted this whole
+   * tree and collapsed every directory in it — six levels of walking, undone by glancing at another
+   * tab. Keyed by path, so it survives the remount and stays correct across navigation.
+   */
+  const expandedMap = useFolder((state) => state.expanded)
+  const toggleExpanded = useFolder((state) => state.toggleExpanded)
+  const shownMap = useFolder((state) => state.shownChildren)
+  const setShownChildren = useFolder((state) => state.setShownChildren)
+
+  const open = expandedMap[path] ?? defaultOpen
   /**
    * How many children to render.
    *
@@ -234,7 +246,7 @@ function DirectoryNode({
    * recursive tree has no fixed row height to window by, so it is capped and says so.
    * The cap is never silent: the remaining count is shown with a button to go further.
    */
-  const [shown, setShown] = useState(TREE_PAGE)
+  const shown = shownMap[path] ?? TREE_PAGE
 
   const query = useQuery({
     ...orpc.folder.list.queryOptions({ input: { path } }),
@@ -247,7 +259,7 @@ function DirectoryNode({
       {name === undefined ? null : (
         <button
           type="button"
-          onClick={() => setOpen((value) => !value)}
+          onClick={() => toggleExpanded(path)}
           className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-left text-xs hover:bg-accent/60"
           style={{ paddingLeft: depth * 12 + 4 }}
           title={path}
@@ -291,7 +303,7 @@ function DirectoryNode({
               {query.data.entries.length > shown ? (
                 <button
                   type="button"
-                  onClick={() => setShown((value) => value + TREE_PAGE)}
+                  onClick={() => setShownChildren(path, shown + TREE_PAGE)}
                   style={{ paddingLeft: (depth + 1) * 12 + 20 }}
                   className="flex w-full items-center gap-1 py-0.5 text-left text-[10px] text-primary hover:underline"
                 >
@@ -323,7 +335,14 @@ function FlatList({ path }: { path: string }): ReactNode {
   const orpc = getOrpc()
   const navigate = useFolder((state) => state.navigate)
   const anchor = useFolder((state) => state.rootPath)
-  const [filter, setFilter] = useState('')
+  /*
+   * Per directory, and in the store for the same reason as the tree's expansion: a tab switch
+   * unmounted this list and cleared a filter someone had just typed over 29,000 rows.
+   */
+  const filters = useFolder((state) => state.filters)
+  const setFilterFor = useFolder((state) => state.setFilter)
+  const filter = filters[path] ?? ''
+  const setFilter = (value: string): void => setFilterFor(path, value)
   const query = useQuery(orpc.folder.list.queryOptions({ input: { path } }))
 
   if (query.isError) {

@@ -368,6 +368,78 @@ export const previewContentSchema = z.discriminatedUnion('kind', [
   /** A BNTX container's own textures, listed for the thumbnail grid. */
   z.object({ kind: z.literal('textures'), textures: z.array(textureInfoSchema) }),
   /**
+   * A model container's structure — no geometry.
+   *
+   * Decoding vertex buffers is a different project; what a `.bfres` can usefully say without one is
+   * what is inside it: models, their shape and material counts, and the textures each material
+   * references.
+   */
+  z.object({
+    kind: z.literal('model'),
+    version: z.string(),
+    name: z.string(),
+    modelCount: z.number().int(),
+    subfileCount: z.number().int(),
+    models: z.array(
+      z.object({
+        name: z.string(),
+        shapeCount: z.number().int(),
+        materialCount: z.number().int(),
+        boneCount: z.number().int(),
+        vertexCount: z.number().int(),
+        materials: z.array(
+          z.object({ name: z.string(), textures: z.array(z.string()), textureCount: z.number().int() })
+        )
+      })
+    ),
+    /** Subfile kinds and how many of each — FMDL, FSKA, FMAA and so on. */
+    subfileKinds: z.array(z.object({ kind: z.string(), count: z.number().int() }))
+  }),
+  /**
+   * An AAMP parameter tree.
+   *
+   * `label` on every node is the resolved name *or* the hash as hex, never a guess — AAMP stores
+   * CRC32 hashes rather than names, and only some resolve.
+   */
+  z.object({
+    kind: z.literal('parameters'),
+    typeName: z.string(),
+    version: z.number().int(),
+    counts: z.object({
+      lists: z.number().int(),
+      objects: z.number().int(),
+      parameters: z.number().int()
+    }),
+    unresolvedNames: z.number().int(),
+    /** Flattened for display: depth, what it is, its label, and a rendered value for parameters. */
+    nodes: z.array(
+      z.object({
+        depth: z.number().int(),
+        kind: z.enum(['list', 'object', 'parameter']),
+        label: z.string(),
+        type: z.string(),
+        value: z.string(),
+        /** False when the value type never occurs in the reference dump, so its layout is inferred. */
+        verified: z.boolean()
+      })
+    ),
+    total: z.number().int()
+  }),
+  /**
+   * An audio sample's metadata. Never its audio: decoding Nintendo ADPCM is out of scope, and
+   * `decodable` says so rather than leaving the user to wonder why nothing plays.
+   */
+  z.object({
+    kind: z.literal('audio'),
+    channelCount: z.number().int(),
+    sampleRate: z.number().int().nullable(),
+    codec: z.string(),
+    durationSeconds: z.number().nullable(),
+    looping: z.boolean(),
+    decodable: z.boolean(),
+    undecodableReason: z.string().nullable()
+  }),
+  /**
    * Recognised but with nothing to show yet. Carries the reason, because "this build does not
    * decode BFRES" and "this file is damaged" are different things to be told.
    */

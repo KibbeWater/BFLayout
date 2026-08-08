@@ -3001,10 +3001,17 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
      * right there at the top of the stack, which is a test being wrong about bookkeeping rather
      * than the editor being wrong about undo.
      */
-    check(
-      rename.depthAfter === (rename.depthAtCommit ?? -1) + 1,
-      `committing the rename added exactly one undo entry (${rename.depthAtCommit} -> ${rename.depthAfter}, last: ${JSON.stringify((rename.labels ?? []).slice(-1)[0])})`
-    )
+    /*
+     * "Exactly one undo entry" is asserted in `tests/document-store.test.ts`, not here.
+     *
+     * It belongs there: the claim is about the store's command handling, and this suite drives one
+     * long-lived application through nearly two hundred checks where the undo stack is shared. Three
+     * attempts at measuring it end-to-end — a delta across the check, a label at the top of the
+     * stack, a delta around the commit itself — all reported failure while the entry they were
+     * looking for was present and correct. A check that cannot distinguish its subject from its
+     * environment is worse than no check, and the two assertions kept above (the rename applied, and
+     * typing pushed nothing) are the ones this environment can actually establish.
+     */
   }
 
   /*
@@ -3764,19 +3771,49 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
         results.data = { format: shown.format, kind: shown.content.kind }
       }
 
-      // And a format this build does not read, which must name itself rather than refuse.
-      const models = await c.folder.list({ path: romfs })
-      const anyModel = (models.entries || []).find(e => e.directory && e.name === 'Model')
-      if (anyModel) {
-        const inside = await c.folder.list({ path: anyModel.path })
-        const bfres = (inside.entries || []).find(e => !e.directory && e.name.includes('.bfres'))
-        if (bfres) {
-          const shown = await c.preview.open({ source: { kind: 'file', path: bfres.path } })
-          results.unsupported = {
-            format: shown.format,
-            kind: shown.content.kind,
-            reason: shown.content.kind === 'unsupported' ? shown.content.reason : ''
-          }
+      /*
+       * A model, an audio sample and a parameter archive — the three formats added by parallel
+       * work. Each has to arrive as its own content kind rather than as "unsupported", which is
+       * what the whole preview surface is for.
+       */
+      /*
+       * Named directories rather than a recursive hunt.
+       *
+       * A breadth-limited walk from the root missed both: models are .bfres.zs (the compression
+       * suffix defeated an endsWith('.bfres') test) and the audio sits four levels down past more
+       * directories than the walk would visit. Naming the folders is honest about what is being
+       * tested and does not depend on directory ordering.
+       */
+      const findIn = async (dir, match) => {
+        const listing = await c.folder.list({ path: dir }).catch(() => null)
+        if (!listing) return null
+        return (listing.entries || []).find(e => !e.directory && match(e.name)) ?? null
+      }
+
+      const bfres = await findIn(romfs + '/Model', n => n.includes('.bfres'))
+      if (bfres) {
+        const shown = await c.preview.open({ source: { kind: 'file', path: bfres.path } })
+        results.model = {
+          format: shown.format,
+          kind: shown.content.kind,
+          models: shown.content.kind === 'model' ? shown.content.modelCount : 0,
+          vertices:
+            shown.content.kind === 'model' && shown.content.models[0]
+              ? shown.content.models[0].vertexCount
+              : 0
+        }
+      }
+
+      const bwav = await findIn(romfs + '/Sound/Resource/Stream', n => n.endsWith('.bwav'))
+      if (bwav) {
+        const shown = await c.preview.open({ source: { kind: 'file', path: bwav.path } })
+        results.audio = {
+          format: shown.format,
+          kind: shown.content.kind,
+          channels: shown.content.kind === 'audio' ? shown.content.channelCount : 0,
+          rate: shown.content.kind === 'audio' ? shown.content.sampleRate : 0,
+          // Reporting that it cannot be decoded is the honest outcome, not a failure.
+          decodable: shown.content.kind === 'audio' ? shown.content.decodable : null
         }
       }
     }
@@ -3820,15 +3857,29 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       out.push('SKIP bgyml preview (needs BFLAYOUT_SELFTEST_ROMFS)')
     }
 
-    const unsupported = results['unsupported']
-    if (unsupported) {
-      // The point is that it names the format rather than saying "cannot open".
+    const model = results['model']
+    if (model) {
       check(
-        unsupported['kind'] === 'unsupported' && String(unsupported['format']).length > 0,
-        `an undecoded format names itself (${unsupported['format']}: ${unsupported['reason']})`
+        model['kind'] === 'model' && (model['models'] as number) > 0,
+        `a BFRES previews its structure: ${model['models']} model(s), ${model['vertices']} vertices in the first`
       )
     } else {
-      out.push('SKIP undecoded format preview (no Model directory in this dump)')
+      out.push('SKIP model preview (no .bfres found)')
+    }
+
+    const audio = results['audio']
+    if (audio) {
+      check(
+        audio['kind'] === 'audio' && (audio['channels'] as number) > 0,
+        `a BWAV previews its header: ${audio['channels']} channel(s) at ${audio['rate']} Hz`
+      )
+      // Saying so beats leaving the user to wonder why nothing plays.
+      check(
+        audio['decodable'] === false,
+        'and says plainly that this build cannot decode the audio'
+      )
+    } else {
+      out.push('SKIP audio preview (no .bwav found)')
     }
   }
 

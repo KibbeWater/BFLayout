@@ -77,6 +77,12 @@ function Body({ preview }: { preview: Preview }): ReactNode {
       return <BymlTree document={content.document} />
     case 'messages':
       return <MessageList content={content} />
+    case 'model':
+      return <ModelBody content={content} />
+    case 'parameters':
+      return <ParameterBody content={content} />
+    case 'audio':
+      return <AudioBody content={content} />
     case 'textures':
       return <TextureList content={content} />
     case 'unsupported':
@@ -307,6 +313,205 @@ function renderText(text: string): ReactNode {
       part
     )
   )
+}
+
+/**
+ * A model container's structure. No geometry — decoding vertex buffers is a different project, and
+ * what is useful without one is what the file contains.
+ */
+function ModelBody({
+  content
+}: {
+  content: Extract<Preview['content'], { kind: 'model' }>
+}): ReactNode {
+  return (
+    <div className="space-y-3 p-3">
+      <p className="text-[11px] text-muted-foreground">
+        {content.name} · version {content.version} · {content.modelCount} model
+        {content.modelCount === 1 ? '' : 's'} · {content.subfileCount} subfile
+        {content.subfileCount === 1 ? '' : 's'}
+      </p>
+
+      {content.subfileKinds.length > 0 ? (
+        <p className="flex flex-wrap gap-1.5 text-[11px] text-muted-foreground">
+          {content.subfileKinds.map((entry) => (
+            <span key={entry.kind} className="rounded border px-1.5 py-0.5">
+              {entry.kind} × {entry.count}
+            </span>
+          ))}
+        </p>
+      ) : null}
+
+      <ul className="space-y-2">
+        {content.models.map((model) => (
+          <li key={model.name} className="rounded border p-2">
+            <p className="flex items-baseline gap-2">
+              <span className="min-w-0 flex-1 truncate font-mono text-xs">{model.name}</span>
+              <span className="shrink-0 text-[11px] text-muted-foreground">
+                {model.vertexCount.toLocaleString()} vertices · {model.shapeCount} shape
+                {model.shapeCount === 1 ? '' : 's'} · {model.boneCount} bone
+                {model.boneCount === 1 ? '' : 's'}
+              </span>
+            </p>
+            {model.materials.length > 0 ? (
+              <ul className="mt-1.5 space-y-1">
+                {model.materials.map((material) => (
+                  <li key={material.name} className="rounded bg-muted/40 px-1.5 py-1">
+                    <p className="font-mono text-[11px]">{material.name}</p>
+                    {material.textures.length > 0 ? (
+                      <p className="mt-0.5 flex flex-wrap gap-1 text-[10px] text-muted-foreground">
+                        {material.textures.map((texture) => (
+                          <span key={texture}>{texture}</span>
+                        ))}
+                        {material.textureCount > material.textures.length ? (
+                          <span className="text-amber-500">
+                            +{material.textureCount - material.textures.length} more
+                          </span>
+                        ) : null}
+                      </p>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+      {content.models.length < content.modelCount ? (
+        <p className="text-[11px] text-amber-500">
+          Showing {content.models.length} of {content.modelCount} models.
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * An AAMP parameter tree, flattened and indented by depth.
+ *
+ * Labels are the resolved name *or* the hash in hex — AAMP stores CRC32 hashes rather than names and
+ * only some resolve, so a hash is shown as a hash rather than dressed up as a name. A parameter
+ * whose value type never occurs in real files is marked, because its layout is inferred.
+ */
+function ParameterBody({
+  content
+}: {
+  content: Extract<Preview['content'], { kind: 'parameters' }>
+}): ReactNode {
+  const [filter, setFilter] = useState('')
+  const needle = filter.trim().toLowerCase()
+  const shown = useMemo(
+    () =>
+      needle === ''
+        ? content.nodes
+        : content.nodes.filter(
+            (node) =>
+              node.label.toLowerCase().includes(needle) ||
+              node.value.toLowerCase().includes(needle)
+          ),
+    [content.nodes, needle]
+  )
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="shrink-0 border-b px-3 py-1.5">
+        <div className="flex items-center gap-2">
+          <input
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+            placeholder="Filter names and values"
+            className="w-full rounded border bg-input/40 px-1.5 py-1 text-xs outline-none"
+          />
+          <span className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground">
+            {content.typeName} · {content.counts.parameters} parameters
+          </span>
+        </div>
+        {content.unresolvedNames > 0 ? (
+          <p className="mt-1 text-[11px] text-muted-foreground/70">
+            {content.unresolvedNames} name{content.unresolvedNames === 1 ? '' : 's'} shown as a hash:
+            AAMP stores CRC32 hashes, not names, and no candidate matched.
+          </p>
+        ) : null}
+      </div>
+
+      <ul className="min-h-0 flex-1 overflow-auto py-1 font-mono text-[11px]">
+        {shown.map((node, index) => (
+          <li
+            key={`${node.depth}-${node.label}-${index}`}
+            className="flex gap-2 px-2 py-0.5 hover:bg-accent/40"
+            style={{ paddingLeft: `${node.depth * 12 + 8}px` }}
+          >
+            <span className={node.kind === 'parameter' ? '' : 'font-semibold'}>{node.label}</span>
+            {node.kind === 'parameter' ? (
+              <>
+                <span className="text-muted-foreground/50">{node.type}</span>
+                <span className="min-w-0 flex-1 truncate select-text">{node.value}</span>
+                {node.verified ? null : (
+                  <span
+                    title="This value type does not occur in any real file checked, so its layout is inferred"
+                    className="shrink-0 text-amber-500"
+                  >
+                    inferred
+                  </span>
+                )}
+              </>
+            ) : (
+              <span className="text-muted-foreground/50">{node.type}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+      {content.nodes.length < content.total ? (
+        <p className="shrink-0 border-t px-3 py-1 text-[11px] text-amber-500">
+          Showing {content.nodes.length} of {content.total} nodes.
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/** An audio sample's metadata. Playback would need a decoder this build does not have. */
+function AudioBody({
+  content
+}: {
+  content: Extract<Preview['content'], { kind: 'audio' }>
+}): ReactNode {
+  const rows: [string, string][] = [
+    ['Channels', String(content.channelCount)],
+    ['Sample rate', content.sampleRate === null ? 'mixed' : `${content.sampleRate} Hz`],
+    ['Codec', content.codec],
+    [
+      'Duration',
+      content.durationSeconds === null ? 'unknown' : formatDuration(content.durationSeconds)
+    ],
+    ['Looping', content.looping ? 'yes' : 'no']
+  ]
+
+  return (
+    <div className="space-y-3 p-3">
+      <dl className="space-y-1">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex gap-2 text-xs">
+            <dt className="w-28 shrink-0 text-muted-foreground">{label}</dt>
+            <dd className="select-text font-mono">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      {content.decodable ? null : (
+        <p className="rounded bg-muted px-2 py-1.5 text-[11px] text-muted-foreground">
+          {content.undecodableReason ??
+            'This build reads the header but does not decode the audio, so there is nothing to play.'}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function formatDuration(seconds: number): string {
+  const whole = Math.floor(seconds)
+  const minutes = Math.floor(whole / 60)
+  const rest = (seconds - minutes * 60).toFixed(1)
+  return minutes > 0 ? `${minutes}m ${rest}s` : `${rest}s`
 }
 
 function TextureList({

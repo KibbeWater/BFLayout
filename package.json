@@ -24,6 +24,8 @@
     "postinstall": "electron-builder install-app-deps",
     "validate:romfs": "tsx --tsconfig tsconfig.node.json scripts/validate-romfs.ts",
     "validate:astc": "tsx --tsconfig tsconfig.node.json scripts/validate-astc.ts",
+    "validate:ainb": "tsx --tsconfig tsconfig.node.json scripts/validate-ainb.ts",
+    "validate:bfres": "tsx --tsconfig tsconfig.node.json scripts/validate-bfres.ts",
     "validate:bwav": "tsx --tsconfig tsconfig.node.json scripts/validate-bwav.ts",
     "validate:aamp": "tsx --tsconfig tsconfig.node.json scripts/validate-aamp.ts",
     "validate:msbt": "tsx --tsconfig tsconfig.node.json scripts/validate-msbt.ts",

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { createLayoutDocument, createPicturePane } from '@shared/formats/bflyt/create'
 import type { LayoutDocument } from '@shared/formats/bflyt'
 import { setPaneSnapshot, snapshotPane, type Command } from '@renderer/editor/commands'
-import { useDocuments } from '@renderer/editor/store/document'
+import { paneById, useDocuments } from '@renderer/editor/store/document'
 
 /**
  * The unsaved flag, and the save point it is derived from.
@@ -264,6 +264,34 @@ describe('document store save point', () => {
     })
     expect(replaced).toBeNull()
     expect(useDocuments.getState().tabs).toHaveLength(3)
+  })
+
+  it('records a rename as exactly one undo entry', () => {
+    /*
+     * The claim the end-to-end pass could not measure: a rename is one entry, not one per keystroke.
+     * Committing per character meant a twenty-character rename cost twenty presses of Cmd+Z and
+     * evicted twenty real entries from the bounded stack.
+     *
+     * Here rather than in the self-test because the subject is the store, and the store is the only
+     * thing whose undo stack is not shared with a hundred other checks.
+     */
+    const store = useDocuments.getState()
+    const before = tab().history.undo.length
+
+    const pane = paneById(tab().document, paneId)!
+    const wasNamed = snapshotPane(pane)
+    pane.name = 'Renamed'
+    const nowNamed = snapshotPane(pane)
+    store.runCommand(setPaneSnapshot(paneId, 'Edit Renamed', wasNamed, nowNamed))
+
+    expect(tab().history.undo).toHaveLength(before + 1)
+    expect(tab().history.undo[before]!.label).toBe('Edit Renamed')
+    expect(paneById(tab().document, paneId)!.name).toBe('Renamed')
+
+    // And undoing it is symmetrical: one press, back to the original name.
+    store.undo()
+    expect(tab().history.undo).toHaveLength(before)
+    expect(paneById(tab().document, paneId)!.name).not.toBe('Renamed')
   })
 
   it('refuses to reuse a tab that holds unsaved work', () => {

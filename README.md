@@ -14,7 +14,7 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | Materials (colours, blend, alpha compare, texture maps) | Editable |
 | Window panes (nine-slice / pinwheel frames) | Working |
 | Text panes | Drawn in the game's own typeface; glyph layout is still approximate |
-| Other formats | Previewable read-only: fonts with glyph rendering, BNTX textures, BYML/`bgyml` trees, MSBT message tables |
+| Other formats | Previewable read-only: fonts with glyph rendering, BNTX textures, BYML/`bgyml` trees, MSBT text, BFRES model structure, AAMP parameters, BWAV audio metadata, AINB logic |
 | Undo / redo | Working — every edit, including property, material and visibility |
 | Add / delete / duplicate pane, grid snapping | Working |
 | Reorder and reparent panes (z-order) | Working — buttons and Alt+arrows |
@@ -401,6 +401,53 @@ one title's archives, more than every layout, animation and texture combined, pr
 unrecognised files — and all 1,763 loose ones parse with the BYML reader that already existed. The
 scalable fonts the canvas draws real text with were unclassified for the same reason. A unit test
 actively asserted the old behaviour; it now asserts the new one, with the reasoning.
+
+### The formats added by measurement, and what each one cost
+
+Four more parsers, each written against real bytes and each held to the same bar as the codecs
+above — **every file in the dump, or a named and explained exception**:
+
+| | files | parsed | note |
+| --- | --- | --- | --- |
+| MSBT (text) | 3,406 | **100%** | 333,671 messages, every one labelled |
+| BFRES (models) | 2,284 | **100%** | 3,019 models, 5.56M vertices, no geometry decoded |
+| AINB (logic) | 2,574 | **100%** | 62,749 nodes; connections not yet decoded |
+| AAMP (parameters) | 26 | **100%** | counts agree with the header on all 26 |
+| BWAV (audio) | 946 + 2,003 in `.bars` | **100%** | headers only; no audio decoding |
+
+The interesting part is not the percentages, it is what only measurement could have told us.
+
+**BFRES contradicted the reference implementation in four places.** Its group slot order changed in
+v10 — the reference puts skeletal animation straight after models, real files insert two slots, so
+reading the older layout finds *material* animation two slots early. `Model.TotalVertexCount` does
+not exist in v10 at all; vertex counts are instead derived from `bufferSize == stride × vertexCount`,
+which holds on all 4,455 vertex buffers. And the header's `blockOffset` is the string-pool offset
+truncated to 16 bits, so it names the wrong place for the 192 files whose pool sits past 64 KiB.
+
+**BWAV had no reference at all** — Switch-Toolbox contains the string once and then hands the file to
+a reader that cannot parse it. Its sharpest finding: the sample counts at +0x08 and +0x0c are
+different fields that are *identical in all 946 loose files*, so a parser built from loose files
+never learns the difference. Inside a `.bars`, 946 prefetch stubs pin +0x0c at 14,336 samples while
++0x08 holds the real length — read the wrong one and every prefetched track shows as 0.3 seconds.
+
+**AINB postdates the reference entirely.** Its strides were proved jointly rather than assumed:
+`0x74 + commands × 0x18 + nodes × 0x3c` equals the declared offset in all 2,574 files, which only
+lands if both strides are right. Parameter list lengths have no count stored anywhere — they are
+span ÷ stride, with strides taken from the GCD of every span in the corpus. Value type order was
+derived by cross-checking parameter names against the game's *own* node-definition BYML rather than
+recalled, and the global parameter type order turned out to differ from the node one, which is
+exactly the trap a remembered layout would have walked into.
+
+**AAMP disagreed with the brief I wrote.** Only parameters use a 24-bit offset; lists and objects use
+`u16 offset + u16 count`. It is decidable from the files — one object holds more than 255 parameters,
+which a u8 count cannot express — and under the corrected reading all 26 files walk to exactly their
+declared counts. AAMP also stores CRC32 hashes rather than names, and only 660 of 935 resolve: the
+rest display as hex, never as invented text.
+
+Every one of these degrades rather than guesses. Value types never seen in a real file are marked
+inferred; unidentified header words are exposed raw rather than named; capped lists always report the
+true total beside them; and BWAV says plainly that this build cannot decode audio instead of leaving
+someone wondering why nothing plays.
 
 ### Message tables
 
