@@ -15,6 +15,7 @@ import {
   setPaneSnapshot,
   snapshotPane
 } from '@renderer/editor/commands'
+import { ARRANGEMENT_LABELS, arrangeCommand, type Arrangement } from '@renderer/editor/arrange'
 
 const ORIGIN_X = ['Left', 'Center', 'Right']
 const ORIGIN_Y = ['Top', 'Center', 'Bottom']
@@ -33,6 +34,10 @@ export function PropertiesPanel(): ReactNode {
   if (!pane) {
     return <Hint>Select a pane in the hierarchy.</Hint>
   }
+
+  // With several panes picked, the group operations are what the panel is for: the
+  // field editors below only ever act on the first of them.
+  const multiple = tab.selectedPaneIds.length > 1
 
   /**
    * Applies a property edit and records it so Cmd+Z reverses it.
@@ -55,7 +60,15 @@ export function PropertiesPanel(): ReactNode {
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">
-      <Group title={`${pane.kind} · ${pane.name || '(unnamed)'}`}>
+      {multiple ? <ArrangeSection count={tab.selectedPaneIds.length} /> : null}
+
+      <Group
+        title={
+          multiple
+            ? `${tab.selectedPaneIds.length} selected · editing ${pane.name || pane.kind}`
+            : `${pane.kind} · ${pane.name || '(unnamed)'}`
+        }
+      >
         <Field label="Name">
           <input
             value={pane.name}
@@ -195,6 +208,64 @@ export function PropertiesPanel(): ReactNode {
       ) : null}
     </div>
   )
+}
+
+/**
+ * Align and distribute for a multi-pane selection.
+ *
+ * Distribute needs three panes to mean anything — with two there is no middle to
+ * space — so it is disabled rather than hidden, which would make the row jump.
+ */
+function ArrangeSection({ count }: { count: number }): ReactNode {
+  const tab = useActiveTab()
+  const runCommand = useDocuments((state) => state.runCommand)
+
+  const run = (how: Arrangement): void => {
+    if (!tab) return
+    const command = arrangeCommand(tab.document, tab.selectedPaneIds, how)
+    if (command) runCommand(command)
+  }
+
+  const rows: readonly { title: string; items: readonly Arrangement[] }[] = [
+    { title: 'Align', items: ['left', 'centerX', 'right', 'top', 'centerY', 'bottom'] },
+    { title: 'Distribute', items: ['distributeX', 'distributeY'] }
+  ]
+
+  return (
+    <Group title={`Arrange ${count} panes`}>
+      {rows.map((row) => (
+        <div key={row.title} className="flex items-center gap-1.5">
+          <span className="w-16 shrink-0 text-[11px] text-muted-foreground">{row.title}</span>
+          <div className="flex flex-wrap gap-1">
+            {row.items.map((how) => (
+              <button
+                key={how}
+                type="button"
+                onClick={() => run(how)}
+                disabled={how.startsWith('distribute') && count < 3}
+                title={ARRANGEMENT_LABELS[how]}
+                className="rounded border px-1.5 py-0.5 text-[11px] hover:bg-accent disabled:opacity-30"
+              >
+                {ARRANGE_SHORT[how]}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </Group>
+  )
+}
+
+/** Compact labels, since six of them share one row. */
+const ARRANGE_SHORT: Record<Arrangement, string> = {
+  left: 'L',
+  centerX: 'C',
+  right: 'R',
+  top: 'T',
+  centerY: 'M',
+  bottom: 'B',
+  distributeX: 'Horizontal',
+  distributeY: 'Vertical'
 }
 
 /** Material indices a pane draws with, in the order the pane uses them. */

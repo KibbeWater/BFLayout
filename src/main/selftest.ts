@@ -1048,6 +1048,69 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * Align acts on a whole selection. Before this, multi-select only enabled dragging:
+   * the properties panel edits the first selected pane and nothing acted on the group,
+   * so the marquee and shift-click machinery had no payoff.
+   */
+  const arrange = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    // Siblings, so none is an ancestor of another and all move independently.
+    const parent = tab.document.rootPane.children.find(p => p.children.length >= 2)
+    if (!parent) return { error: 'no parent with two children' }
+    const picked = parent.children.slice(0, 3)
+    if (picked.length < 2) return { error: 'need two siblings' }
+
+    // Spread them out so alignment has something to do.
+    picked.forEach((p, i) => { p.translate[0] = i * 37 })
+    store.select(picked.map(p => p.id))
+    await new Promise(r => setTimeout(r, 300))
+
+    const xBefore = picked.map(p => p.translate[0])
+
+    const buttons = [...document.querySelectorAll('button')]
+    const alignLeft = buttons.find(b => (b.title || '') === 'Align left')
+    if (!alignLeft) return { error: 'no align-left button with several panes selected' }
+    alignLeft.click()
+    await new Promise(r => setTimeout(r, 400))
+
+    const now = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+    const findById = (p, id) =>
+      p.id === id ? p : p.children.reduce((f, c) => f || findById(c, id), null)
+    const xAfter = picked.map(p => findById(now.document.rootPane, p.id).translate[0])
+
+    dev.documents.getState().undo()
+    await new Promise(r => setTimeout(r, 250))
+    const undone = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+    const xUndone = picked.map(p => findById(undone.document.rootPane, p.id).translate[0])
+
+    return { xBefore, xAfter, xUndone, count: picked.length }
+  })()`)) as {
+    error?: string
+    xBefore?: number[]
+    xAfter?: number[]
+    xUndone?: number[]
+    count?: number
+  }
+
+  if (arrange.error) {
+    check(false, `align: ${arrange.error}`)
+  } else {
+    const after = arrange.xAfter ?? []
+    check(
+      after.length > 1 && new Set(after.map((value) => Math.round(value))).size === 1,
+      `aligning ${arrange.count} panes left put them on one edge (${(arrange.xBefore ?? []).join(',')} -> ${after.join(',')})`
+    )
+    check(
+      JSON.stringify(arrange.xUndone) === JSON.stringify(arrange.xBefore),
+      'undo restored the original positions'
+    )
+  }
+
+  /*
    * Reordering changes draw order, which is the whole point: tree order *is* paint
    * order, so bringing a pane forward means moving it later among its siblings. Until
    * this existed the only way to change what drew on top was delete-and-recreate.

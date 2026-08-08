@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest'
 import { createNullPane, createPicturePane } from '@shared/formats/bflyt/create'
 import {
   RESIZE_HANDLES,
+  alignDeltas,
   alignmentCandidates,
   alignmentSnap,
+  distributeDeltas,
   handleCursor,
   handlePosition,
   panesInRect,
@@ -328,5 +330,121 @@ describe('alignment candidates', () => {
   it('returns nothing when everything is moving', () => {
     const ids = flat.map((entry) => entry.pane.id)
     expect(alignmentCandidates(flat, ids)).toEqual([])
+  })
+})
+
+/**
+ * Align and distribute.
+ *
+ * Deltas are returned rather than applied because `translate` lives in each pane's
+ * parent's space; these tests are pure geometry in world space.
+ */
+describe('alignDeltas', () => {
+  // Three rects at different x and y, as [left, bottom, right, top] with Y up.
+  const rects: Rect[] = [
+    [0, 0, 100, 50],
+    [200, 100, 240, 180],
+    [50, 300, 150, 320]
+  ]
+
+  const applied = (edge: Parameters<typeof alignDeltas>[1]): Rect[] =>
+    rects.map((rect, i) => {
+      const [dx, dy] = alignDeltas(rects, edge)[i]!
+      return [rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy]
+    })
+
+  it('aligns left edges to the leftmost', () => {
+    expect(applied('left').map((rect) => rect[0])).toEqual([0, 0, 0])
+  })
+
+  it('aligns right edges to the rightmost', () => {
+    expect(applied('right').map((rect) => rect[2])).toEqual([240, 240, 240])
+  })
+
+  it('aligns tops to the highest, since Y is up', () => {
+    expect(applied('top').map((rect) => rect[3])).toEqual([320, 320, 320])
+  })
+
+  it('aligns bottoms to the lowest', () => {
+    expect(applied('bottom').map((rect) => rect[1])).toEqual([0, 0, 0])
+  })
+
+  it('centres on the bounding box, not the average', () => {
+    // Bounding box spans x 0..240, so every centre lands on 120 — and a second pass
+    // changes nothing, which an average-based centre would not guarantee.
+    const centres = applied('centerX').map((rect) => (rect[0] + rect[2]) / 2)
+    expect(centres).toEqual([120, 120, 120])
+
+    const once = applied('centerX')
+    const twice = once.map((rect, i) => {
+      const [dx] = alignDeltas(once, 'centerX')[i]!
+      return (rect[0] + dx + rect[2] + dx) / 2
+    })
+    expect(twice).toEqual(centres)
+  })
+
+  it('only touches the axis it aligns', () => {
+    expect(alignDeltas(rects, 'left').every(([, dy]) => dy === 0)).toBe(true)
+    expect(alignDeltas(rects, 'top').every(([dx]) => dx === 0)).toBe(true)
+  })
+
+  it('leaves a single rect alone and handles none', () => {
+    expect(alignDeltas([[10, 10, 20, 20]], 'left')).toEqual([[0, 0]])
+    expect(alignDeltas([], 'left')).toEqual([])
+  })
+})
+
+describe('distributeDeltas', () => {
+  it('spaces the middle rects evenly and leaves the extremes put', () => {
+    // Centres at 5, 15, 100: the middle should move to 52.5.
+    const rects: Rect[] = [
+      [0, 0, 10, 10],
+      [10, 0, 20, 10],
+      [95, 0, 105, 10]
+    ]
+    const deltas = distributeDeltas(rects, 'x')
+    expect(deltas[0]).toEqual([0, 0])
+    expect(deltas[2]).toEqual([0, 0])
+    expect(deltas[1]![0]).toBeCloseTo(37.5)
+  })
+
+  it('returns deltas in the caller order, not sorted order', () => {
+    // The middle rect is listed first, so its delta must come back first.
+    const rects: Rect[] = [
+      [10, 0, 20, 10],
+      [0, 0, 10, 10],
+      [95, 0, 105, 10]
+    ]
+    const deltas = distributeDeltas(rects, 'x')
+    expect(deltas[1]).toEqual([0, 0])
+    expect(deltas[2]).toEqual([0, 0])
+    expect(deltas[0]![0]).toBeCloseTo(37.5)
+  })
+
+  it('does nothing with fewer than three rects', () => {
+    expect(distributeDeltas([[0, 0, 10, 10]], 'x')).toEqual([[0, 0]])
+    expect(
+      distributeDeltas(
+        [
+          [0, 0, 10, 10],
+          [50, 0, 60, 10]
+        ],
+        'x'
+      )
+    ).toEqual([
+      [0, 0],
+      [0, 0]
+    ])
+  })
+
+  it('distributes vertically too', () => {
+    const rects: Rect[] = [
+      [0, 0, 10, 10],
+      [0, 10, 10, 20],
+      [0, 95, 10, 105]
+    ]
+    const deltas = distributeDeltas(rects, 'y')
+    expect(deltas[1]![1]).toBeCloseTo(37.5)
+    expect(deltas[1]![0]).toBe(0)
   })
 })

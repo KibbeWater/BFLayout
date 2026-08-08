@@ -275,3 +275,91 @@ export function alignmentCandidates(
     .filter((entry) => !excluded.has(entry.pane.id) && entry.pane.id !== rootId)
     .map((entry) => worldBounds(entry))
 }
+
+/**
+ * Which edge or axis a group of panes lines up on.
+ *
+ * `centerX`/`centerY` use the selection's overall bounding box rather than an
+ * average, so aligning twice is idempotent.
+ */
+export type AlignEdge = 'left' | 'centerX' | 'right' | 'top' | 'centerY' | 'bottom'
+
+/**
+ * World-space deltas that bring every rect onto the same edge.
+ *
+ * Returned as deltas rather than applied, because `translate` lives in each pane's
+ * *parent's* coordinate space — the caller has to convert, and a rotated or scaled
+ * parent makes that a per-pane transform rather than a shared one.
+ *
+ * Y is up, which is why `top` takes the maximum and `bottom` the minimum.
+ */
+export function alignDeltas(rects: readonly Rect[], edge: AlignEdge): [number, number][] {
+  if (rects.length === 0) return []
+  const normalized = rects.map((rect) => normalizeRect(rect))
+
+  const lefts = normalized.map((rect) => rect[0])
+  const bottoms = normalized.map((rect) => rect[1])
+  const rights = normalized.map((rect) => rect[2])
+  const tops = normalized.map((rect) => rect[3])
+
+  const minLeft = Math.min(...lefts)
+  const maxRight = Math.max(...rights)
+  const minBottom = Math.min(...bottoms)
+  const maxTop = Math.max(...tops)
+
+  return normalized.map(([left, bottom, right, top]) => {
+    switch (edge) {
+      case 'left':
+        return [minLeft - left, 0]
+      case 'right':
+        return [maxRight - right, 0]
+      case 'centerX':
+        return [(minLeft + maxRight) / 2 - (left + right) / 2, 0]
+      case 'top':
+        return [0, maxTop - top]
+      case 'bottom':
+        return [0, minBottom - bottom]
+      case 'centerY':
+        return [0, (minBottom + maxTop) / 2 - (bottom + top) / 2]
+    }
+  })
+}
+
+/**
+ * World-space deltas that space rects evenly along one axis.
+ *
+ * The outermost two stay put and everything between is spread by centre, which is
+ * what "distribute" means in every tool that has it — moving the extremes as well
+ * would make the operation depend on where the group happens to sit.
+ *
+ * Fewer than three rects have nothing to distribute, so they all get zero.
+ */
+export function distributeDeltas(
+  rects: readonly Rect[],
+  axis: 'x' | 'y'
+): [number, number][] {
+  const deltas: [number, number][] = rects.map(() => [0, 0])
+  if (rects.length < 3) return deltas
+
+  const normalized = rects.map((rect) => normalizeRect(rect))
+  const centreOf = (rect: Rect): number =>
+    axis === 'x' ? (rect[0] + rect[2]) / 2 : (rect[1] + rect[3]) / 2
+
+  // Sorted by position, but deltas are returned in the caller's original order.
+  const order = normalized
+    .map((rect, index) => ({ index, centre: centreOf(rect) }))
+    .sort((a, b) => a.centre - b.centre)
+
+  const first = order[0]!
+  const last = order[order.length - 1]!
+  const step = (last.centre - first.centre) / (order.length - 1)
+
+  order.forEach((entry, position) => {
+    if (position === 0 || position === order.length - 1) return
+    const target = first.centre + step * position
+    const delta = target - entry.centre
+    deltas[entry.index] = axis === 'x' ? [delta, 0] : [0, delta]
+  })
+
+  return deltas
+}
