@@ -35,7 +35,7 @@ romfs dump (Switch, v1.0.4) is parsed and rewritten byte for byte:
 | | files | byte-exact |
 | --- | --- | --- |
 | SARC archives | 567 | 100% |
-| BFLYT layouts | 544 | 99.1% |
+| BFLYT layouts | 544 | 99.3% |
 | BFLAN animations | 2187 | 99.9% |
 | BNTX containers | 74,480 textures decoded | 100% |
 
@@ -208,12 +208,18 @@ not, and each is now covered by a unit test:
 - **`cnt1` sections were written last.** They sit near the *front* of the stream.
 - **Pane flag bits past the two modelled ones were cleared** on save.
 - **Padding bytes were zeroed** where shipped files put `0xff`.
+- **A `txt1` capacity field was clamped up to the stored length.** Shipped files
+  exist where the authored capacity is genuinely *smaller* than the string in it —
+  one pane declares 34 bytes for a 50-byte string — so an unconditional `max`
+  rewrote a field nobody had edited. It now only grows for a pane marked dirty.
 
 What is left, and precisely why:
 
-- **Four layouts** whose `prt1` part panes carry data reached through offsets, so
-  the "keep the unmodelled tail" trick that fixed the other sections cannot be
-  applied without writing blocks twice. Plus one material difference not yet traced.
+- **Four layouts**, and only these, whose `prt1` part panes carry data reached
+  through offsets — each shows up as a short `prt1` and nothing else. The "keep the
+  unmodelled tail" trick that fixed the other sections cannot be applied here
+  without writing those blocks twice; `prt1` needs each property's
+  `overrideSection`/`panelInfo` extent modelled properly.
 - **Two animations** (`MiniGame_PictQuiz_00_Mosaic{Rough,Normal}`) whose `pai1`
   entry declares `tagCount = 1` but carries **two** offset slots. The second points
   at a 20-byte block — a u32 followed by the name `__CUS_Float_0` — that runs to the

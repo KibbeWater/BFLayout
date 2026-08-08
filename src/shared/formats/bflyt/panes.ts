@@ -479,9 +479,17 @@ export function writePane(writer: BinaryWriter, pane: Pane, major: number): void
     case 'txt1': {
       // Bytes the string occupies in the file, including its NUL terminator.
       const textBytes = pane.text.length * 2 + 2
-      // Runtime capacity is kept as authored, and only grown if the string no
-      // longer fits — so an untouched pane writes back byte for byte.
-      writer.u16(Math.max(pane.textCapacityBytes, textBytes))
+      /*
+       * The authored capacity is written back verbatim unless the pane was edited.
+       *
+       * It is *not* clamped up to the stored length: shipped files exist where the
+       * capacity is genuinely smaller than the string in it — one pane in
+       * Event_NewsTelop_00 declares 34 bytes of capacity for a 50-byte string — and
+       * an unconditional `Math.max` rewrote that field and broke the round-trip.
+       * Growing it only matters once someone has actually made the text longer, and
+       * `dirty` is what says they have.
+       */
+      writer.u16(pane.dirty ? Math.max(pane.textCapacityBytes, textBytes) : pane.textCapacityBytes)
       writer.u16(textBytes)
       writer.u16(pane.materialIndex)
       writer.u16(pane.fontIndex)
