@@ -23,10 +23,14 @@ import {
   createTextPane,
   createWindowPane
 } from '@shared/formats/bflyt/create'
-import { addPane, deletePane } from '@renderer/editor/commands'
+import {
+  addPane,
+  deletePane,
+  setPaneSnapshot,
+  snapshotPane
+} from '@renderer/editor/commands'
 import {
   countPanes,
-  markPaneDirty,
   paneById,
   useActiveTab,
   useDocuments
@@ -182,7 +186,7 @@ function PaneRow({ pane, depth }: { pane: Pane; depth: number }): ReactNode {
   const tab = useActiveTab()
   const select = useDocuments((state) => state.select)
   const toggleCollapsed = useDocuments((state) => state.toggleCollapsed)
-  const mutate = useDocuments((state) => state.mutate)
+  const runCommand = useDocuments((state) => state.runCommand)
 
   if (!tab) return null
 
@@ -191,11 +195,19 @@ function PaneRow({ pane, depth }: { pane: Pane; depth: number }): ReactNode {
   const hasChildren = pane.children.length > 0
   const meta = KIND_META[pane.kind]
 
+  // Hiding a pane is an edit like any other, so it belongs on the undo stack.
   const toggleVisible = (): void => {
-    mutate((current) => {
-      pane.visible = !pane.visible
-      markPaneDirty(current.document, pane.id)
-    })
+    const before = snapshotPane(pane)
+    pane.visible = !pane.visible
+    const after = snapshotPane(pane)
+    runCommand(
+      setPaneSnapshot(
+        pane.id,
+        `${after['visible'] ? 'Show' : 'Hide'} ${pane.name || pane.kind}`,
+        before,
+        after
+      )
+    )
   }
 
   return (

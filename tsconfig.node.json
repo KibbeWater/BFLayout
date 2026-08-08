@@ -18,13 +18,17 @@
     "baseUrl": ".",
     "paths": {
       "@shared/*": ["src/shared/*"],
-      "@main/*": ["src/main/*"]
+      "@main/*": ["src/main/*"],
+      "@renderer/*": ["src/renderer/*"]
     }
   },
   "include": [
     "src/main/**/*.ts",
     "src/shared/**/*.ts",
     "tests/**/*.ts",
+    // Renderer undo commands are pure document manipulation with no DOM use, and
+    // tests/commands.test.ts covers them, so this project needs to see the file.
+    "src/renderer/editor/commands.ts",
     "electron.vite.config.ts",
     "drizzle.config.ts",
     "vitest.config.ts"

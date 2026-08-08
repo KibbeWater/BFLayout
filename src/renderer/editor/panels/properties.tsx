@@ -9,19 +9,19 @@ import type {
   WindowPane
 } from '@shared/formats/bflyt'
 import { walkPanes } from '@shared/formats/bflyt'
+import { paneById, useActiveTab, useDocuments } from '@renderer/editor/store/document'
 import {
-  markPaneDirty,
-  paneById,
-  useActiveTab,
-  useDocuments
-} from '@renderer/editor/store/document'
+  setMaterialSnapshot,
+  setPaneSnapshot,
+  snapshotPane
+} from '@renderer/editor/commands'
 
 const ORIGIN_X = ['Left', 'Center', 'Right']
 const ORIGIN_Y = ['Top', 'Center', 'Bottom']
 
 export function PropertiesPanel(): ReactNode {
   const tab = useActiveTab()
-  const mutate = useDocuments((state) => state.mutate)
+  const runCommand = useDocuments((state) => state.runCommand)
 
   if (!tab) {
     return <Hint>Open a layout to edit pane properties.</Hint>
@@ -34,11 +34,23 @@ export function PropertiesPanel(): ReactNode {
     return <Hint>Select a pane in the hierarchy.</Hint>
   }
 
+  /**
+   * Applies a property edit and records it so Cmd+Z reverses it.
+   *
+   * These edits used to go straight through `mutate`, which left every field in
+   * this panel outside undo — and worse, made the history lie: after typing in a
+   * width field, Cmd+Z would revert the previous canvas drag while the toolbar
+   * still described the drag as the thing about to be undone.
+   *
+   * The whole pane is snapshotted rather than the specific fields touched, because
+   * `apply` is an opaque closure and every pane kind has different fields. Panes
+   * are small once children are excluded.
+   */
   const edit = (apply: () => void): void => {
-    mutate((current) => {
-      apply()
-      markPaneDirty(current.document, pane.id)
-    })
+    const before = snapshotPane(pane)
+    apply()
+    const after = snapshotPane(pane)
+    runCommand(setPaneSnapshot(pane.id, `Edit ${pane.name || pane.kind}`, before, after))
   }
 
   return (
@@ -249,7 +261,7 @@ function MaterialSection({
   document: LayoutDocument
   pane: Pane
 }): ReactNode {
-  const mutate = useDocuments((state) => state.mutate)
+  const runCommand = useDocuments((state) => state.runCommand)
   const slots = materialIndicesOf(pane)
   const [slot, setSlot] = useState(0)
 
@@ -269,10 +281,12 @@ function MaterialSection({
   }
 
   const edit = (apply: () => void): void => {
-    mutate(() => {
-      apply()
-      material.dirty = true
-    })
+    const before = structuredClone({ ...material })
+    apply()
+    const after = structuredClone({ ...material })
+    runCommand(
+      setMaterialSnapshot(active!.index, `Edit ${material.name || 'material'}`, before, after)
+    )
   }
 
   const users = countMaterialUsers(document, active!.index)
