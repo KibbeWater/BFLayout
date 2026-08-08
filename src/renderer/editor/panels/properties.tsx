@@ -70,10 +70,11 @@ export function PropertiesPanel(): ReactNode {
         }
       >
         <Field label="Name">
-          <input
+          {/* 24 bytes is the width of the field the writer stores it in. */}
+          <TextField
             value={pane.name}
-            onChange={(event) => edit(() => (pane.name = event.target.value.slice(0, 24)))}
-            className="w-full rounded border bg-input/40 px-1.5 py-0.5"
+            maxLength={24}
+            onChange={(next) => edit(() => (pane.name = next))}
           />
         </Field>
         <Row>
@@ -400,10 +401,10 @@ function MaterialSection({
       ) : null}
 
       <Field label="Name">
-        <input
+        <TextField
           value={material.name}
-          onChange={(event) => edit(() => (material.name = event.target.value.slice(0, 28)))}
-          className="w-full rounded border bg-input/40 px-1.5 py-0.5"
+          maxLength={28}
+          onChange={(next) => edit(() => (material.name = next))}
         />
       </Field>
 
@@ -678,12 +679,12 @@ function KindSpecific({
       return (
         <Group title="Text">
           <Field label="Content">
-            <textarea
-              value={text.text}
-              rows={3}
-              onChange={(event) => edit(() => (text.text = event.target.value))}
-              className="w-full resize-y rounded border bg-input/40 px-1.5 py-0.5 font-mono"
-            />
+            {/*
+              Committed on blur rather than per keystroke, like the name fields: a
+              caption is re-rasterised and re-uploaded to the GPU on every change, and
+              each one was its own undo entry.
+            */}
+            <TextArea value={text.text} onChange={(next) => edit(() => (text.text = next))} />
           </Field>
           <Row>
             <NumberField
@@ -818,6 +819,102 @@ function Field({ label, children }: { label: string; children: ReactNode }): Rea
 
 function Row({ children }: { children: ReactNode }): ReactNode {
   return <div className="flex gap-1.5">{children}</div>
+}
+
+/**
+ * A text input that commits on blur or Enter, and abandons on Escape.
+ *
+ * Committing per keystroke pushed one undo entry per character: renaming a pane cost
+ * twenty presses of Cmd+Z and evicted twenty real entries from the 200-deep stack.
+ * It also meant every intermediate string was written to the document, so a rename
+ * passed through prefixes that were not names anyone chose.
+ */
+function TextField({
+  value,
+  maxLength,
+  onChange
+}: {
+  value: string
+  maxLength: number
+  onChange: (value: string) => void
+}): ReactNode {
+  const [draft, setDraft] = useState<string | null>(null)
+  // See NumberField: blur fires synchronously from blur(), before React flushes.
+  const cancelling = useRef(false)
+
+  const commit = (text: string): void => {
+    setDraft(null)
+    if (cancelling.current) {
+      cancelling.current = false
+      return
+    }
+    const trimmed = text.slice(0, maxLength)
+    if (trimmed !== value) onChange(trimmed)
+  }
+
+  return (
+    <input
+      value={draft ?? value}
+      maxLength={maxLength}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={(event) => commit(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          commit(event.currentTarget.value)
+          event.currentTarget.blur()
+          return
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          cancelling.current = true
+          setDraft(null)
+          event.currentTarget.blur()
+        }
+      }}
+      className="w-full rounded border bg-input/40 px-1.5 py-0.5"
+    />
+  )
+}
+
+/** The multi-line sibling of TextField, for a text pane's content. */
+function TextArea({
+  value,
+  onChange
+}: {
+  value: string
+  onChange: (value: string) => void
+}): ReactNode {
+  const [draft, setDraft] = useState<string | null>(null)
+  const cancelling = useRef(false)
+
+  const commit = (text: string): void => {
+    setDraft(null)
+    if (cancelling.current) {
+      cancelling.current = false
+      return
+    }
+    if (text !== value) onChange(text)
+  }
+
+  return (
+    <textarea
+      value={draft ?? value}
+      rows={3}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={(event) => commit(event.target.value)}
+      onKeyDown={(event) => {
+        // Enter inserts a newline here, so only Escape is special.
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          cancelling.current = true
+          setDraft(null)
+          event.currentTarget.blur()
+        }
+      }}
+      className="w-full resize-y rounded border bg-input/40 px-1.5 py-0.5 font-mono"
+    />
+  )
 }
 
 function NumberField({

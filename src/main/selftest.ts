@@ -1048,6 +1048,79 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * Renaming is one undo entry, not one per keystroke. Committing per character meant
+   * a twenty-character rename cost twenty presses of Cmd+Z and evicted twenty real
+   * entries from the 200-deep stack.
+   */
+  const rename = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    const target = tab.document.rootPane.children[0]
+    if (!target) return { error: 'no pane to rename' }
+    store.select([target.id])
+    await new Promise(r => setTimeout(r, 300))
+
+    const input = [...document.querySelectorAll('aside input')]
+      .find(i => i.value === target.name)
+    if (!input) return { error: 'no name field showing the selected pane' }
+
+    const depthBefore = dev.documents.getState().tabs
+      .find(t => t.documentId === store.activeId).history.undo.length
+
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value'
+    ).set
+    // Type five characters, each one an input event.
+    for (const value of ['Zz', 'Zzb', 'Zzbc', 'Zzbcd', 'Zzbcde']) {
+      setter.call(input, value)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      await new Promise(r => setTimeout(r, 40))
+    }
+    const duringTyping = dev.documents.getState().tabs
+      .find(t => t.documentId === store.activeId).history.undo.length
+
+    // React listens for focusout, not blur, so a synthetic 'blur' never reaches
+    // onBlur. Driving the real thing does.
+    input.focus()
+    input.blur()
+    await new Promise(r => setTimeout(r, 350))
+
+    const now = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+    const findById = (p, id) =>
+      p.id === id ? p : p.children.reduce((f, c) => f || findById(c, id), null)
+
+    return {
+      depthBefore,
+      duringTyping,
+      depthAfter: now.history.undo.length,
+      name: findById(now.document.rootPane, target.id).name
+    }
+  })()`)) as {
+    error?: string
+    depthBefore?: number
+    duringTyping?: number
+    depthAfter?: number
+    name?: string
+  }
+
+  if (rename.error) {
+    check(false, `rename: ${rename.error}`)
+  } else {
+    check(rename.name === 'Zzbcde', `the rename applied on blur (${rename.name})`)
+    check(
+      rename.duringTyping === rename.depthBefore,
+      `typing pushed nothing onto the undo stack (${rename.depthBefore} -> ${rename.duringTyping})`
+    )
+    check(
+      rename.depthAfter === (rename.depthBefore ?? 0) + 1,
+      `the whole rename is one undo entry (${rename.depthBefore} -> ${rename.depthAfter})`
+    )
+  }
+
+  /*
    * The hierarchy filter. Finding a pane by name in a several-hundred-pane tree
    * previously meant scrolling; the tree mode had no filter at all.
    */
