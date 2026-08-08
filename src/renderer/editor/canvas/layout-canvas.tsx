@@ -135,6 +135,24 @@ export function LayoutCanvas(): ReactNode {
   /** Bumped when a texture finishes loading, purely to force a redraw. */
   const [textureRevision, setTextureRevision] = useState(0)
   const [textureFailures, setTextureFailures] = useState<{ name: string; detail: string }[]>([])
+  /**
+   * Bumped by an in-progress drag or resize, to re-render this component and its
+   * overlays without touching the document store.
+   *
+   * A drag used to go through `mutate`, which replaces the tabs array and so
+   * re-rendered *everything* subscribed to it — every hierarchy row with its four
+   * selectors, three full tree walks, the folder browser, the texture list, the
+   * ResizeObserver, the menu IPC subscription and the session-snapshot timer — sixty
+   * times a second. The document is a mutable object graph the renderer owns, so a
+   * drag can edit it in place and redraw; the store is told once, on pointer-up,
+   * where the undo entry is recorded anyway.
+   *
+   * The cost is that panels showing a dragged pane's numbers update on release
+   * rather than continuously. The canvas, its handles and the coordinate readout all
+   * stay live, which is where the eye is during a drag.
+   */
+  const [interactionTick, setInteractionTick] = useState(0)
+
   /** Marquee and guides live in React state because they are drawn as overlays. */
   const [marquee, setMarquee] = useState<MarqueeState | null>(null)
   const [guides, setGuides] = useState<readonly Guide[]>([])
@@ -144,7 +162,6 @@ export function LayoutCanvas(): ReactNode {
   // every frame change, so it is the only dependency the draw effect needs.
   const overrides = usePlayback((state) => state.overrides)
   const select = useDocuments((state) => state.select)
-  const mutate = useDocuments((state) => state.mutate)
   const runCommand = useDocuments((state) => state.runCommand)
   const undo = useDocuments((state) => state.undo)
   const redo = useDocuments((state) => state.redo)
@@ -447,7 +464,12 @@ export function LayoutCanvas(): ReactNode {
         // Test seam: the self-test asserts on texture load state, which is
         // otherwise unreachable from outside React. See src/main/selftest.ts.
         const dev = (window as unknown as Record<string, Record<string, unknown>>)['__bfdev']
-        if (dev) dev['renderer'] = rendererRef.current
+        if (dev) {
+          dev['renderer'] = rendererRef.current
+          // The camera lives in this component, not the renderer, and the drag test
+          // needs it to turn a pane's world position into a click point.
+          dev['camera'] = cameraRef.current
+        }
       }
       // The element only just appeared, so nothing has drawn into it yet.
       setTextureRevision((value) => value + 1)
@@ -520,7 +542,7 @@ export function LayoutCanvas(): ReactNode {
     // Middle button or space-less right drag pans the view.
     if (event.button === 1 || event.button === 2) {
       panRef.current = { x: event.clientX, y: event.clientY }
-      event.currentTarget.setPointerCapture(event.pointerId)
+      capturePointer(event)
       return
     }
 
@@ -540,7 +562,7 @@ export function LayoutCanvas(): ReactNode {
           translate: [...pane.translate] as [number, number, number]
         }
       }
-      event.currentTarget.setPointerCapture(event.pointerId)
+      capturePointer(event)
       return
     }
 
@@ -554,7 +576,7 @@ export function LayoutCanvas(): ReactNode {
       const started: MarqueeState = { startX: x, startY: y, x, y, additive }
       marqueeRef.current = started
       setMarquee(started)
-      event.currentTarget.setPointerCapture(event.pointerId)
+      capturePointer(event)
       return
     }
 
@@ -593,7 +615,7 @@ export function LayoutCanvas(): ReactNode {
       origins,
       originBounds: singleEntry ? worldBounds(singleEntry) : null
     }
-    event.currentTarget.setPointerCapture(event.pointerId)
+    capturePointer(event)
   }
 
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
@@ -635,9 +657,8 @@ export function LayoutCanvas(): ReactNode {
       const quantise = (value: number): number =>
         step > 0 ? Math.round(value / step) * step : value
 
-      mutate((current) => {
-        const target = findById(current.document.rootPane, resize.paneId)
-        if (!target) return
+      const target = findById(tab.document.rootPane, resize.paneId)
+      if (target) {
         target.width = resize.before.width
         target.height = resize.before.height
         target.translate[0] = resize.before.translate[0]
@@ -648,8 +669,11 @@ export function LayoutCanvas(): ReactNode {
         target.height = result.height
         target.translate[0] = resize.before.translate[0] + result.translateDx
         target.translate[1] = resize.before.translate[1] + result.translateDy
-        markPaneDirty(current.document, resize.paneId)
-      })
+        markPaneDirty(tab.document, resize.paneId)
+        // Redraw and re-place the handles without invalidating the store.
+        setInteractionTick((value) => value + 1)
+        draw()
+      }
       return
     }
 
@@ -712,17 +736,17 @@ export function LayoutCanvas(): ReactNode {
     }
     setGuides(shown)
 
-    mutate((current) => {
-      for (const paneId of drag.paneIds) {
-        const origin = drag.origins.get(paneId)
-        if (!origin) continue
-        const pane = findById(current.document.rootPane, paneId)
-        if (!pane) continue
-        pane.translate[0] = place(origin[0] + dx) + guideDx
-        pane.translate[1] = place(origin[1] + dy) + guideDy
-        markPaneDirty(current.document, paneId)
-      }
-    })
+    for (const paneId of drag.paneIds) {
+      const origin = drag.origins.get(paneId)
+      if (!origin) continue
+      const pane = findById(tab.document.rootPane, paneId)
+      if (!pane) continue
+      pane.translate[0] = place(origin[0] + dx) + guideDx
+      pane.translate[1] = place(origin[1] + dy) + guideDy
+      markPaneDirty(tab.document, paneId)
+    }
+    setInteractionTick((value) => value + 1)
+    draw()
   }
 
   const endInteraction = (event: React.PointerEvent<HTMLDivElement>): void => {
@@ -995,7 +1019,9 @@ export function LayoutCanvas(): ReactNode {
           container={containerRef.current}
           marquee={marquee}
           guides={guides}
-          revision={tab.revision}
+          // Includes the in-progress ticker, so handles follow a live drag even
+          // though the store is not told until pointer-up.
+          revision={tab.revision + interactionTick}
         />
       </div>
     </div>
@@ -1111,6 +1137,24 @@ function toLocalDelta(entry: PaneTransform, dx: number, dy: number): [number, nu
  * Children already move with their parent, so including both would apply the drag
  * delta twice and the child would race ahead.
  */
+/**
+ * Takes pointer capture, tolerating a failure.
+ *
+ * `setPointerCapture` throws NotFoundError when the pointer id is not active — which
+ * a synthetic event has, and which also happens if the pointer is released between
+ * the event being queued and the handler running. It used to throw out of
+ * `onPointerDown` and abandon the interaction it had just set up, so the drag simply
+ * never started. Capture is an enhancement (it keeps events coming when the cursor
+ * leaves the element), not a requirement.
+ */
+function capturePointer(event: React.PointerEvent<HTMLDivElement>): void {
+  try {
+    event.currentTarget.setPointerCapture(event.pointerId)
+  } catch {
+    // Without capture the drag still works while the cursor stays over the canvas.
+  }
+}
+
 /** The pane that has `paneId` as a direct child, or null for the root. */
 function parentOf(document: LayoutDocument, paneId: string): Pane | null {
   if (!document.rootPane) return null

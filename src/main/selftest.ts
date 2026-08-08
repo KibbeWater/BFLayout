@@ -902,6 +902,152 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * Drag a pane with real pointer events.
+   *
+   * Nothing else here touches the canvas's pointer handlers — every other check
+   * drives the store through `__bfdev` — so the whole drag path was untested. That
+   * matters now the drag mutates the document in place and redraws locally instead
+   * of going through the store: a mistake there would leave panes unmovable with
+   * every other check still green.
+   */
+  /*
+   * Give the canvas the window first.
+   *
+   * The settings DB persists between runs and earlier checks drag the splitters, so
+   * the canvas can start a few dozen pixels wide — at which point fitting clamps to
+   * the minimum zoom and a click point means nothing. This goes through the menu
+   * rather than patching settings directly because panel widths reach the UI via the
+   * query cache, which only the mutation path invalidates.
+   */
+  win.webContents.send('menu-command', 'canvas-only')
+  await win.webContents.executeJavaScript('new Promise(r => setTimeout(r, 700))')
+
+  const dragResult = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    // A leaf pane, so no child moves with it.
+    const leaves = []
+    const walk = (p) => { if (p.children.length === 0) leaves.push(p); p.children.forEach(walk) }
+    walk(tab.document.rootPane)
+    const target = leaves.find(p => p.kind === 'pic1') ?? leaves[0]
+    if (!target) return { error: 'no pane to drag' }
+
+    window.dispatchEvent(new CustomEvent('bflayout-command', { detail: 'fit' }))
+    await new Promise(r => setTimeout(r, 400))
+
+    store.select([target.id])
+    await new Promise(r => setTimeout(r, 250))
+
+    /*
+     * The largest canvas, not the first.
+     *
+     * The texture panel draws its thumbnails as canvases too, so querySelector was
+     * returning a 44x22 thumbnail — every click point computed from it landed
+     * nowhere near the layout.
+     */
+    const canvases = [...document.querySelectorAll('canvas')]
+    const surface = canvases.sort(
+      (a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width
+    )[0]
+    if (!surface) return { error: 'no canvas element' }
+    const box = surface.getBoundingClientRect()
+    const container = surface.parentElement
+    if (!container) return { error: 'canvas has no container' }
+
+    // Aim at the pane's own centre so the pointer-down hits it.
+    const gl = dev.renderer
+    const entry = gl && gl.flattened ? gl.flattened.find(e => e.pane.id === target.id) : null
+    if (!entry) return { error: 'pane not in the renderer' }
+    const camera = dev.camera
+    if (!camera) return { error: 'no camera on the dev seam' }
+    // Affine is [a, b, c, d, e, f]; the translation is the last pair.
+    const [wx, wy] = [entry.world[4], entry.world[5]]
+    const cx = box.left + box.width / 2 + (wx - camera.x) * camera.zoom
+    const cy = box.top + box.height / 2 - (wy - camera.y) * camera.zoom
+
+    const fire = (type, x, y, extra) => container.dispatchEvent(
+      new PointerEvent(type, {
+        clientX: x, clientY: y, bubbles: true, cancelable: true,
+        pointerId: 1, isPrimary: true, button: 0, buttons: type === 'pointerup' ? 0 : 1,
+        ...(extra || {})
+      })
+    )
+
+    const findById = (p, id) =>
+      p.id === id ? p : p.children.reduce((f, c) => f || findById(c, id), null)
+
+    fire('pointerdown', cx, cy)
+    await new Promise(r => setTimeout(r, 80))
+
+    /*
+     * Measure whichever pane the pointer actually grabbed, not the one aimed at.
+     *
+     * Shipped layouts routinely put a full-screen bnd1 or pan1 last in the tree, and
+     * the hit test returns the topmost pane — so aiming at a specific leaf and
+     * asserting on it would be testing the layout's z-order rather than the drag.
+     */
+    const selectedAfterDown = dev.documents.getState().tabs
+      .find(t => t.documentId === store.activeId).selectedPaneIds.slice()
+    const grabbedId = selectedAfterDown[0]
+    const grabbed = grabbedId ? findById(tab.document.rootPane, grabbedId) : null
+    if (!grabbed) return { error: 'pointer-down selected nothing to drag' }
+    const before = [grabbed.translate[0], grabbed.translate[1]]
+
+    // Two moves, because the bug class this guards appears only after the first.
+    fire('pointermove', cx + 30, cy)
+    await new Promise(r => setTimeout(r, 60))
+    fire('pointermove', cx + 60, cy)
+    await new Promise(r => setTimeout(r, 60))
+    fire('pointerup', cx + 60, cy)
+    await new Promise(r => setTimeout(r, 250))
+
+    const now = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+    const moved = now.document ? findById(now.document.rootPane, grabbedId) : null
+
+    return {
+      before,
+      after: moved ? [moved.translate[0], moved.translate[1]] : null,
+      grabbed: grabbedId,
+      undoDepth: now.history.undo.length,
+      unsaved: now.unsaved,
+      kind: grabbed.kind,
+      point: [Math.round(cx), Math.round(cy)],
+      box: [Math.round(box.left), Math.round(box.top), Math.round(box.width), Math.round(box.height)],
+      selectedAfterDown
+    }
+  })()`)) as {
+    error?: string
+    before?: number[]
+    after?: number[] | null
+    undoDepth?: number
+    unsaved?: boolean
+    grabbed?: string
+    kind?: string
+    point?: number[]
+    box?: number[]
+    selectedAfterDown?: string[]
+  }
+
+  if (dragResult.error) {
+    check(false, `pointer drag: ${dragResult.error}`)
+  } else {
+    const before = dragResult.before ?? [0, 0]
+    const after = dragResult.after ?? [0, 0]
+    check(
+      after[0] !== before[0],
+      `dragging with real pointer events moved the pane (x ${before[0]} -> ${after[0]}` +
+        `; grabbed ${dragResult.kind} ${dragResult.grabbed} at ${JSON.stringify(dragResult.point)} in ${JSON.stringify(dragResult.box)}` +
+        `, selected after down ${JSON.stringify(dragResult.selectedAfterDown)})`
+    )
+    // One entry for the whole drag, not one per frame.
+    check(dragResult.undoDepth === 1, `the drag recorded one undo entry (${dragResult.undoDepth})`)
+    check(dragResult.unsaved === true, 'the drag marked the document unsaved')
+  }
+
+  /*
    * Drive a command down the real menu path: main sends `menu-command`, the
    * preload bridge relays it, the renderer acts.
    *
