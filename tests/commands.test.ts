@@ -8,8 +8,10 @@ import {
 } from '@shared/formats/bflyt/create'
 import type { LayoutDocument, TextPane } from '@shared/formats/bflyt'
 import {
+  addPane,
   composeCommands,
   deletePane,
+  duplicatePane,
   setMaterialSnapshot,
   setPaneSnapshot,
   snapshotPane
@@ -229,5 +231,94 @@ describe('composeCommands', () => {
     const composed = composeCommands('Nothing', [])
     expect(() => composed.apply(document)).not.toThrow()
     expect(() => composed.invert(document)).not.toThrow()
+  })
+})
+
+describe('duplicatePane', () => {
+  it('copies the subtree in beside the original with fresh ids', () => {
+    const parent = createPicturePane('Btn')
+    const child = createTextPane('Caption')
+    parent.children.push(child)
+    const document = createLayoutDocument()
+    document.rootPane!.children.push(parent)
+
+    const command = duplicatePane(document, parent.id)
+    expect(command).not.toBeNull()
+    command!.apply(document)
+
+    const siblings = document.rootPane!.children
+    expect(siblings).toHaveLength(2)
+    const copy = siblings[1]!
+    // Placed directly after the original, not appended at the end.
+    expect(siblings[0]).toBe(parent)
+    expect(copy.id).not.toBe(parent.id)
+    expect(copy.children).toHaveLength(1)
+    expect(copy.children[0]!.id).not.toBe(child.id)
+    // Copies are new content, so they must be encoded rather than replayed.
+    expect(copy.dirty).toBe(true)
+  })
+
+  it('gives every copied pane a name nothing else is using', () => {
+    // Animations and groups address panes by name, so a duplicate name would make
+    // one animation drive two panes.
+    const parent = createPicturePane('Btn')
+    parent.children.push(createTextPane('Caption'))
+    const document = createLayoutDocument()
+    document.rootPane!.children.push(parent)
+
+    duplicatePane(document, parent.id)!.apply(document)
+    duplicatePane(document, parent.id)!.apply(document)
+
+    const names: string[] = []
+    const collect = (pane: { name: string; children: { name: string }[] }): void => {
+      names.push(pane.name)
+      for (const child of pane.children) collect(child as typeof pane)
+    }
+    collect(document.rootPane! as unknown as Parameters<typeof collect>[0])
+    expect(new Set(names).size).toBe(names.length)
+  })
+
+  it('strips an existing counter rather than stacking them', () => {
+    const pane = createPicturePane('Btn_1')
+    const document = createLayoutDocument()
+    document.rootPane!.children.push(pane)
+
+    duplicatePane(document, pane.id)!.apply(document)
+    expect(document.rootPane!.children[1]!.name).toBe('Btn_2')
+  })
+
+  it('undoes as a single removal', () => {
+    const pane = createPicturePane('Btn')
+    const document = createLayoutDocument()
+    document.rootPane!.children.push(pane)
+
+    const command = duplicatePane(document, pane.id)!
+    command.apply(document)
+    expect(document.rootPane!.children).toHaveLength(2)
+    command.invert(document)
+    expect(document.rootPane!.children).toHaveLength(1)
+    expect(document.rootPane!.children[0]).toBe(pane)
+  })
+
+  it('returns null for the root, which has no parent to copy into', () => {
+    const document = createLayoutDocument()
+    expect(duplicatePane(document, document.rootPane!.id)).toBeNull()
+  })
+})
+
+describe('addPane', () => {
+  it('is idempotent, so composing several inserts cannot double-insert', () => {
+    // duplicateSelection applies each command as it builds, then hands the
+    // composite to runCommand which applies it again.
+    const document = createLayoutDocument()
+    const pane = createPicturePane('New')
+    const command = addPane(document.rootPane!.id, pane)
+
+    command.apply(document)
+    command.apply(document)
+    expect(document.rootPane!.children).toHaveLength(1)
+
+    command.invert(document)
+    expect(document.rootPane!.children).toHaveLength(0)
   })
 })

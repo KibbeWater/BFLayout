@@ -10,6 +10,7 @@ import {
   Puzzle,
   Scissors,
   Square,
+  Copy,
   Trash2,
   Type
 } from 'lucide-react'
@@ -26,6 +27,7 @@ import {
 import {
   addPane,
   deletePane,
+  duplicatePane,
   setPaneSnapshot,
   snapshotPane
 } from '@renderer/editor/commands'
@@ -131,6 +133,17 @@ function PaneActions(): ReactNode {
     setAdding(false)
   }
 
+  /**
+   * Copies the selection in beside itself. Offered as a button as well as Cmd+D,
+   * because a keyboard-only feature is one most people never find.
+   */
+  const duplicate = (): void => {
+    if (!tab || !selected || isRoot) return
+    const command = duplicatePane(tab.document, selected.id)
+    if (!command) return
+    runCommand(command)
+  }
+
   const remove = (): void => {
     if (!tab || !selected || isRoot) return
     const command = deletePane(tab.document, selected.id)
@@ -167,6 +180,23 @@ function PaneActions(): ReactNode {
           </ul>
         ) : null}
       </div>
+      <button
+        type="button"
+        onClick={duplicate}
+        disabled={!selected || isRoot}
+        title={
+          isRoot
+            ? 'The root pane cannot be duplicated'
+            : selected
+              ? `Duplicate ${selected.name || 'the selected pane'} and its children (Cmd+D)`
+              : 'Select a pane first'
+        }
+        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-accent disabled:opacity-30"
+      >
+        <Copy className="size-3.5" />
+        Duplicate
+      </button>
+
       <button
         type="button"
         onClick={remove}

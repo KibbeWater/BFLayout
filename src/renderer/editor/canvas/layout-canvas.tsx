@@ -43,6 +43,7 @@ import {
 import {
   composeCommands,
   deletePane,
+  duplicatePane,
   setPaneFields,
   type Command
 } from '@renderer/editor/commands'
@@ -50,10 +51,6 @@ import {
 import { usePlayback } from '@renderer/editor/store/playback'
 import { LayoutRenderer, type Camera } from './renderer'
 
-/**
- * Arrow keys to a layout-space delta. Y is negated because layout space puts +Y
- * upwards while the keys mean screen directions.
- */
 /** The zoom range the camera is allowed to take, wherever it is set from. */
 const MIN_ZOOM = 0.02
 const MAX_ZOOM = 8
@@ -65,6 +62,10 @@ function clampZoom(value: number): number {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value))
 }
 
+/**
+ * Arrow keys to a layout-space delta. Y is negated because layout space puts +Y
+ * upwards while the keys mean screen directions.
+ */
 const NUDGE_KEYS: Record<string, readonly [number, number]> = {
   ArrowLeft: [-1, 0],
   ArrowRight: [1, 0],
@@ -202,6 +203,31 @@ export function LayoutCanvas(): ReactNode {
     []
   )
 
+  /** Copies every selected pane in beside itself, as one undo entry. */
+  const duplicateSelection = useCallback((paneIds: readonly string[]): void => {
+    const state = useDocuments.getState()
+    const tab = state.tabs.find((entry) => entry.documentId === state.activeId)
+    if (!tab) return
+
+    // Built and applied one at a time so each copy sees the names the previous one
+    // took, and so the insert indices stay valid.
+    const commands: Command[] = []
+    for (const id of paneIds) {
+      const command = duplicatePane(tab.document, id)
+      if (!command) continue
+      command.apply(tab.document)
+      commands.push(command)
+    }
+
+    if (commands.length === 0) return
+    state.runCommand(
+      composeCommands(
+        `Duplicate ${commands.length} pane${commands.length === 1 ? '' : 's'}`,
+        commands
+      )
+    )
+  }, [])
+
   /** Deletes every selected pane, as one undo entry. */
   const deleteSelection = useCallback((paneIds: readonly string[]): void => {
     const state = useDocuments.getState()
@@ -274,6 +300,12 @@ export function LayoutCanvas(): ReactNode {
       if (event.key === 'Delete' || event.key === 'Backspace') {
         event.preventDefault()
         deleteSelection(selection)
+        return
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd') {
+        event.preventDefault()
+        duplicateSelection(selection)
         return
       }
 

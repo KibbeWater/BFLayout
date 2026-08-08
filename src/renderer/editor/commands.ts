@@ -1,5 +1,5 @@
 import type { LayoutDocument, Pane } from '@shared/formats/bflyt'
-import { findPane } from '@shared/formats/bflyt'
+import { findPane, nextPaneId, walkPanes } from '@shared/formats/bflyt'
 
 /**
  * Undo is a command stack of before/after snapshots of the specific fields a
@@ -181,6 +181,60 @@ export function setMaterialSnapshot(
 }
 
 /**
+ * Copies a pane and its subtree in beside the original.
+ *
+ * Copying an existing pane and nudging it is the most common edit in layout work —
+ * a second button, a third row — and there was no way to do it: `create.ts` only
+ * makes blank panes, so the alternative was rebuilding every property by hand.
+ *
+ * Every copied pane gets a fresh id and a name that is not already taken, because
+ * animations and groups address panes *by name*; duplicating a name would make an
+ * animation drive two panes at once.
+ */
+export function duplicatePane(document: LayoutDocument, paneId: string): Command | null {
+  const parent = findPane(document.rootPane, (candidate) =>
+    candidate.children.some((child) => child.id === paneId)
+  )
+  if (!parent) return null
+
+  const index = parent.children.findIndex((child) => child.id === paneId)
+  const original = parent.children[index]
+  if (!original) return null
+
+  const taken = new Set<string>()
+  if (document.rootPane) walkPanes(document.rootPane, (pane) => taken.add(pane.name))
+
+  const nameFor = (base: string): string => {
+    // Strip any counter the original already carries, so copies of Btn_1 become
+    // Btn_2 rather than Btn_1_1.
+    const stem = base.replace(/_\d+$/, '') || 'Pane'
+    for (let i = 1; i < 1000; i++) {
+      const candidate = `${stem}_${i}`
+      if (!taken.has(candidate)) {
+        taken.add(candidate)
+        return candidate
+      }
+    }
+    return `${stem}_${taken.size}`
+  }
+
+  const clone = (pane: Pane): Pane => {
+    const { children, ...rest } = pane as Pane & { children: Pane[] }
+    const copy = structuredClone(rest) as Pane & { children: Pane[] }
+    copy.id = nextPaneId(pane.kind)
+    copy.name = nameFor(pane.name)
+    // A copy is new content, so it must be encoded rather than replayed from the
+    // original's preserved bytes.
+    copy.dirty = true
+    copy.children = children.map(clone)
+    return copy
+  }
+
+  const copy = clone(original)
+  return addPane(parent.id, copy, index + 1)
+}
+
+/**
  * Bundles several commands into one undo entry.
  *
  * Anything that acts on a multi-pane selection needs this. Dragging twenty
@@ -243,6 +297,10 @@ export function addPane(parentId: string, pane: Pane, at?: number): Command {
     apply: (document) => {
       const parent = findPane(document.rootPane, (candidate) => candidate.id === parentId)
       if (!parent) return
+      // Idempotent: callers that compose several inserts apply each as they build,
+      // so `runCommand` applies the composite a second time. Splicing again would
+      // put the same pane object in the tree twice.
+      if (parent.children.includes(pane)) return
       const index = at ?? parent.children.length
       parent.children.splice(Math.max(0, Math.min(index, parent.children.length)), 0, pane)
       // The parent's own section is unchanged; the new pane brings its own.
