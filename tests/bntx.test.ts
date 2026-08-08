@@ -551,11 +551,15 @@ describe('bntx format support', () => {
     // ASTC arrived with the LDR decoder; tests/astc.test.ts covers it properly.
     expect(isFormatSupported(BntxFormat.Astc4x4, BntxFormatVariant.Srgb)).toBe(true)
     expect(isFormatSupported(BntxFormat.Astc12x12, BntxFormatVariant.Unorm)).toBe(true)
+    // BC7 is verified against the GPU; see the cross-check in src/main/selftest.ts.
+    expect(isFormatSupported(BntxFormat.BC7, BntxFormatVariant.Unorm)).toBe(true)
+    expect(isFormatSupported(BntxFormat.BC7, BntxFormatVariant.Srgb)).toBe(true)
   })
 
   it('rejects the formats it defers', () => {
     expect(isFormatSupported(BntxFormat.BC6H, BntxFormatVariant.UFloat)).toBe(false)
-    expect(isFormatSupported(BntxFormat.BC7, BntxFormatVariant.Unorm)).toBe(false)
+    // BC7 read as a float would be BC6H territory, which has no decoder.
+    expect(isFormatSupported(BntxFormat.BC7, BntxFormatVariant.Float)).toBe(false)
     // ASTC read as a float is the HDR profile, which the decoder does not cover.
     expect(isFormatSupported(BntxFormat.Astc4x4, BntxFormatVariant.Float)).toBe(false)
     // A known channel layout read as an unsupported type is still unsupported.
@@ -563,8 +567,9 @@ describe('bntx format support', () => {
   })
 
   it('throws UnsupportedFormatError rather than guessing', () => {
+    // BC7 decodes now; BC6H is the remaining format with no decoder.
     expect(() =>
-      decodeSurface(BntxFormat.BC7, BntxFormatVariant.Unorm, 4, 4, new Uint8Array(16))
+      decodeSurface(BntxFormat.BC6H, BntxFormatVariant.UFloat, 4, 4, new Uint8Array(16))
     ).toThrow(UnsupportedFormatError)
 
     const astc = parseBntx(

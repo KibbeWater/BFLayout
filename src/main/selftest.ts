@@ -1244,17 +1244,31 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   } else {
     // Found and deswizzled here in main, which has the filesystem and the codecs; the
     // renderer only needs the linear blocks and the GPU.
-    const sample = await findBc7Sample(bc7Romfs)
-    if (!sample) {
+    const samples = await findBc7Samples(bc7Romfs, 6)
+    if (samples.length === 0) {
       check(false, `BC7 GPU cross-check: no BC7 texture found (${bc7Diagnostics})`)
     } else {
       const bc7 = (await win.webContents.executeJavaScript(`(async () => {
       const bntx = window.__bfdev.bntx
       if (!bntx) return { error: 'no bntx helpers on the dev seam' }
 
-      const width = ${sample.width}
-      const height = ${sample.height}
-      const bytes = new Uint8Array(${JSON.stringify([...sample.blocks])})
+      const samples = ${JSON.stringify(
+        samples.map((entry) => ({
+          name: entry.name,
+          width: entry.width,
+          height: entry.height,
+          blocks: [...entry.blocks]
+        }))
+      )}
+
+      const totals = { total: 0, exact: 0, within1: 0, worst: 0, worstAt: -1, worstName: '' }
+      const perMode = {}
+      let firstBad = null
+
+      for (const sample of samples) {
+      const width = sample.width
+      const height = sample.height
+      const bytes = new Uint8Array(sample.blocks)
       const blocksX = Math.ceil(width / 4)
       const blocksY = Math.ceil(height / 4)
 
@@ -1316,7 +1330,12 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
         'in vec2 uv;',
         'uniform sampler2D t;',
         'out vec4 o;',
-        'void main(){ o = texture(t, vec2(uv.x, 1.0 - uv.y)); }'
+        // No vertical flip. readPixels returns rows bottom-up and uv.y is 0 at the bottom
+        // of the viewport, so sampling v = uv.y already lines row 0 of the readback up
+        // with row 0 of the uploaded data. Flipping here as well compared the CPU decode
+        // against the texture's *last* row — which produced real pixels from the wrong
+        // place, and looked exactly like a broken decoder.
+        'void main(){ o = texture(t, uv); }'
       ].join(NL)
 
       const vs = gl.createShader(gl.VERTEX_SHADER)
@@ -1358,34 +1377,105 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, gpu)
 
       // Compare, tolerating the ±1 the spec leaves to the implementation.
-      let exact = 0
-      let within1 = 0
-      let worst = 0
-      let worstAt = -1
       for (let i = 0; i < cpu.length; i++) {
         const delta = Math.abs(cpu[i] - gpu[i])
-        if (delta === 0) exact++
-        if (delta <= 1) within1++
-        if (delta > worst) { worst = delta; worstAt = i }
+        totals.total++
+        if (delta === 0) totals.exact++
+        if (delta <= 1) totals.within1++
+        if (delta > totals.worst) {
+          totals.worst = delta
+          totals.worstAt = i
+          totals.worstName = sample.name
+        }
+      }
+
+      /*
+       * Per-mode accuracy, so a failure names the mode rather than the whole format.
+       * BC7 has eight modes with different bit layouts, and an error in one of them looks
+       * identical in aggregate to an error in all of them.
+       */
+      for (let by = 0; by < blocksY; by++) {
+        for (let bx = 0; bx < blocksX; bx++) {
+          const at = (by * blocksX + bx) * 16
+          let mode = -1
+          for (let bit = 0; bit < 8; bit++) {
+            if ((bytes[at] >> bit) & 1) { mode = bit; break }
+          }
+          const key = 'mode' + mode
+          perMode[key] = perMode[key] || { blocks: 0, bad: 0 }
+          perMode[key].blocks++
+
+          let bad = false
+          for (let ty = 0; ty < 4 && !bad; ty++) {
+            const y = by * 4 + ty
+            if (y >= height) break
+            for (let tx = 0; tx < 4; tx++) {
+              const x = bx * 4 + tx
+              if (x >= width) break
+              const off = (y * width + x) * 4
+              for (let c = 0; c < 4; c++) {
+                if (Math.abs(cpu[off + c] - gpu[off + c]) > 1) { bad = true; break }
+              }
+              if (bad) break
+            }
+          }
+          if (bad) {
+            perMode[key].bad++
+            if (!firstBad) {
+              const texels = []
+              for (let ty = 0; ty < 4; ty++) {
+                for (let tx = 0; tx < 4; tx++) {
+                  const y = by * 4 + ty
+                  const x = bx * 4 + tx
+                  if (y >= height || x >= width) continue
+                  const off = (y * width + x) * 4
+                  texels.push({
+                    t: ty * 4 + tx,
+                    cpu: [cpu[off], cpu[off+1], cpu[off+2], cpu[off+3]],
+                    gpu: [gpu[off], gpu[off+1], gpu[off+2], gpu[off+3]]
+                  })
+                }
+              }
+              firstBad = {
+                name: sample.name,
+                mode,
+                block: [...bytes.slice(at, at + 16)],
+                texels: texels.slice(0, 4)
+              }
+            }
+          }
+        }
+      }
+
       }
 
       return {
-        size: width + 'x' + height,
-        total: cpu.length,
-        exact,
-        within1,
-        worst,
-        worstPixel: worstAt >= 0 ? Math.floor(worstAt / 4) : -1
+        samples: samples.length,
+        total: totals.total,
+        exact: totals.exact,
+        within1: totals.within1,
+        worst: totals.worst,
+        worstPixel: totals.worstAt >= 0 ? Math.floor(totals.worstAt / 4) : -1,
+        worstName: totals.worstName,
+        perMode,
+        firstBad
       }
     })()`)) as {
       error?: string
-      name?: string
-      size?: string
+      samples?: number
+      worstName?: string
       total?: number
       exact?: number
       within1?: number
       worst?: number
       worstPixel?: number
+      perMode?: Record<string, { blocks: number; bad: number }>
+      firstBad?: {
+        name: string
+        mode: number
+        block: number[]
+        texels: { t: number; cpu: number[]; gpu: number[] }[]
+      } | null
     }
 
       if (bc7.error) {
@@ -1396,7 +1486,9 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
         const within1Pct = ((bc7.within1 ?? 0) / total) * 100
         check(
           within1Pct === 100,
-          `BC7 matches the GPU within one unit on ${within1Pct.toFixed(2)}% of ${sample.name} (${bc7.size}), worst delta ${bc7.worst}`
+          `BC7 matches the GPU within one unit across ${bc7.samples} textures ` +
+            `(${within1Pct.toFixed(2)}% of ${total} samples, worst delta ${bc7.worst ?? 0}` +
+            `${(bc7.worst ?? 0) > 0 ? ` in ${bc7.worstName}` : ''})`
         )
         // Reported rather than asserted: the last unit of the interpolation is
         // implementation-defined, so exactness is informative but not a requirement.
@@ -1404,6 +1496,22 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
           `[selftest] INFO BC7 byte-exact on ${exactPct.toFixed(2)}% of samples ` +
             `(worst delta ${bc7.worst} at pixel ${bc7.worstPixel})`
         )
+        for (const [mode, stats] of Object.entries(bc7.perMode ?? {})) {
+          console.log(
+            `[selftest] INFO BC7 ${mode}: ${stats.blocks - stats.bad}/${stats.blocks} blocks match`
+          )
+        }
+        if (bc7.firstBad) {
+          console.log(
+            `[selftest] INFO BC7 first bad block is mode ${bc7.firstBad.mode} in ${bc7.firstBad.name}, bytes ` +
+              bc7.firstBad.block.map((b) => b.toString(16).padStart(2, '0')).join(' ')
+          )
+          for (const texel of bc7.firstBad.texels) {
+            console.log(
+              `[selftest] INFO   texel ${texel.t}: cpu ${texel.cpu.join(',')} vs gpu ${texel.gpu.join(',')}`
+            )
+          }
+        }
       }
     }
   }
@@ -2152,9 +2260,20 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
  */
 let bc7Diagnostics = 'not run'
 
-async function findBc7Sample(
-  root: string
-): Promise<{ name: string; width: number; height: number; blocks: Uint8Array } | null> {
+interface Bc7Sample {
+  name: string
+  width: number
+  height: number
+  blocks: Uint8Array
+}
+
+/**
+ * Several textures rather than one, because BC7's eight modes are what needs covering.
+ *
+ * A single texture exercised only modes 0, 2 and 3 — all of them opaque and multi-subset —
+ * so the alpha modes went unchecked. Sampling across files picks up the rest.
+ */
+async function findBc7Samples(root: string, want: number): Promise<Bc7Sample[]> {
   const { readdir, readFile, stat } = await import('node:fs/promises')
   const { join } = await import('node:path')
   const { isBntx, parseBntx, BntxFormat, deswizzle, divRoundUp, mipBlockHeightLog2 } =
@@ -2180,7 +2299,7 @@ async function findBc7Sample(
     return result.data
   }
 
-  const MAX_SIDE = 256
+  const MAX_SIDE = 128
 
   /*
    * Every candidate is examined, not the first few hundred.
@@ -2212,6 +2331,7 @@ async function findBc7Sample(
   }
   await walk(root, 0)
 
+  const samples: Bc7Sample[] = []
   let parsed = 0
   let bc7Seen = 0
   let readFailures = 0
@@ -2267,11 +2387,15 @@ async function findBc7Sample(
         const needed = blocksX * rows * 16
         if (blocks.length < needed) continue
 
-        return {
+        samples.push({
           name: `${path.split('/').pop()}:${texture.name}`,
           width: texture.width,
           height: rows * 4,
           blocks: blocks.subarray(0, needed)
+        })
+        if (samples.length >= want) {
+          bc7Diagnostics = `${samples.length} sampled from ${candidates.length} candidates`
+          return samples
         }
       } catch {
         deswizzleFailures++
@@ -2282,6 +2406,7 @@ async function findBc7Sample(
 
   bc7Diagnostics =
     `${candidates.length} candidates, ${parsed} parsed, ${bc7Seen} BC7, ` +
-    `${readFailures} unreadable, ${deswizzleFailures} deswizzle failures`
-  return null
+    `${readFailures} unreadable, ${deswizzleFailures} deswizzle failures, ` +
+    `${samples.length} sampled`
+  return samples
 }

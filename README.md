@@ -25,7 +25,7 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | BYML documents | Read-only tree viewer (v1–7, both byte orders) |
 | Session restore | Offers the previous session on launch |
 | Crash recovery | Snapshots unsaved documents; offers them back on launch |
-| BNTX textures | Decode and preview (BC1–BC5, all ASTC LDR block sizes, uncompressed; no BC6H/BC7) |
+| BNTX textures | Decode and preview (BC1–BC5, BC7, all ASTC LDR block sizes, uncompressed; no BC6H) |
 | BFLAN animation | Parse, play, scrub, inspect keyframes (no keyframe editing) |
 | Canvas resize handles, rubber-band select, alignment guides | Working |
 | Folder / romfs browsing | Working (tree or list, lazy per directory, windowed rows) |
@@ -317,31 +317,38 @@ compression that no image editor opens. Encoding goes through Electron's `native
 rather than a PNG library, since it is already present and this is the only place a
 real image format is needed.
 
-`BC1`–`BC5`, ASTC and the uncompressed formats decode. **`BC6H` and `BC7` do
-not** — they are recognised and reported, and the pane draws a magenta checker
-rather than plausible-but-wrong pixels.
+`BC1`–`BC5`, `BC7`, ASTC and the uncompressed formats decode. **`BC6H` does not** — it is
+recognised and reported, and the pane draws a magenta checker rather than
+plausible-but-wrong pixels.
 
-#### BC7: a decoder that does not pass yet
+#### BC7, verified against the GPU
 
-There is a BC7 decoder in `formats/bntx/bc7.ts` and it is **deliberately not wired
-in**. It is wrong, and there is now a harness that says so.
+BC7 packs a 4x4 block eight different ways, with a different bit layout, endpoint
+precision, subset count and index width in each. A mistake in any one mode produces
+plausible pixels rather than an obvious failure, which is why it went undecoded while
+there was nothing to check against.
 
-`EXT_texture_compression_bptc` turns out to be available in this Electron, so the GPU
-decodes BC7 natively — which makes it ground truth. The self-test finds a real BC7
-texture in a dump, deswizzles it in main, then in the renderer decodes the same blocks
-twice: once on the CPU and once by uploading them with `compressedTexImage2D`, rendering,
-and reading the pixels back. Run it with:
+There is something to check against. `EXT_texture_compression_bptc` is available in this
+Electron, so **the GPU decodes BC7 natively** — which makes hardware the reference, using
+the game's own textures as input and needing no encoder. The self-test finds real BC7
+textures in a dump, deswizzles them in main, then in the renderer decodes the same blocks
+twice: once on the CPU, once by uploading them with `compressedTexImage2D`, rendering, and
+reading the pixels back.
 
 ```bash
 BFLAYOUT_SELFTEST_BC7=1 BFLAYOUT_SELFTEST_ROMFS=/path/to/romfs \
   BFLAYOUT_SELFTEST=1 pnpm dev
 ```
 
-Current state: **25% of bytes match, worst delta 249**. So the decoder has at least one
-real error — most likely in the endpoint parity bits or the anchor-index widths, where a
-mistake shifts colours without looking obviously broken. That is exactly the failure the
-harness exists to catch, and exactly why the decoder stays behind the placeholder until
-it passes. It is gated behind its own flag so the default suite is not permanently red.
+Result: **1,097,728 samples across 6 textures and 17,152 blocks, byte-exact, worst delta
+zero**, covering seven of the eight modes (mode 7 does not appear in this game's art). The
+check reports per-mode block counts, so a failure names the mode rather than the format.
+
+It is behind its own flag because it needs a dump, and it earned its keep immediately: the
+first run reported 25% matching with a worst delta of 249. That turned out to be **the
+harness, not the decoder** — `readPixels` returns rows bottom-up and the shader was also
+flipping `v`, so the comparison was against the texture's last row. Real pixels from the
+wrong place, which is exactly what a broken decoder looks like.
 
 The partition and fix-up tables were extracted mechanically from the reference
 implementation Switch-Toolbox ships rather than retyped, since 192 rows of sixteen values

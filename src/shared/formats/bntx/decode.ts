@@ -1,5 +1,6 @@
 import { FormatParseError, UnsupportedFormatError } from '@shared/binary/errors'
 import { decodeAstc } from './astc'
+import { decodeBc7Block } from './bc7'
 import type { BntxTexture } from './container'
 import {
   BntxChannelSource,
@@ -23,10 +24,9 @@ import { deswizzle, divRoundUp, mipBlockHeightLog2 } from './swizzle'
  * rounding of the 1/3 and 2/3 endpoints is implementation-defined and differs
  * by a unit or two between vendors.
  *
- * BC6H and BC7 are deliberately absent from `isFormatSupported` — see there. ASTC lives
- * in ./astc.ts because it is an order of magnitude more code than everything here, and a
- * BC7 decoder exists in ./bc7.ts but is not wired in until it has been checked against
- * the GPU; showing a magenta placeholder beats showing pixels nobody has verified.
+ * BC6H is deliberately absent from `isFormatSupported` — see there. ASTC and BC7 live in
+ * ./astc.ts and ./bc7.ts because each is an order of magnitude more code than everything
+ * here; both are checked against an independent implementation rather than trusted.
  */
 
 export interface DecodedImage {
@@ -51,6 +51,7 @@ export function isFormatSupported(format: BntxFormat, variant: BntxFormatVariant
     case BntxFormat.BC1:
     case BntxFormat.BC2:
     case BntxFormat.BC3:
+    case BntxFormat.BC7:
       return variant === BntxFormatVariant.Unorm || variant === BntxFormatVariant.Srgb
     case BntxFormat.R11G11B10:
       return variant === BntxFormatVariant.Float
@@ -176,6 +177,8 @@ export function decodeSurface(
       return decodeBlocks(width, height, 16, data, decodeBc2Block)
     case BntxFormat.BC3:
       return decodeBlocks(width, height, 16, data, decodeBc3Block)
+    case BntxFormat.BC7:
+      return decodeBlocks(width, height, 16, data, (bytes, at, out) => decodeBc7Block(bytes, at, out))
     case BntxFormat.BC4:
       return decodeBlocks(
         width,
