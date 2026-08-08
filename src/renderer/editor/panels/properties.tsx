@@ -11,6 +11,8 @@ import type {
 import { walkPanes } from '@shared/formats/bflyt'
 import { paneById, useActiveTab, useDocuments } from '@renderer/editor/store/document'
 import {
+  PANE_NAME_BYTES,
+  paneNameProblem,
   setMaterialSnapshot,
   setPaneSnapshot,
   snapshotPane
@@ -73,8 +75,9 @@ export function PropertiesPanel(): ReactNode {
           {/* 24 bytes is the width of the field the writer stores it in. */}
           <TextField
             value={pane.name}
-            maxLength={24}
+            maxLength={PANE_NAME_BYTES}
             onChange={(next) => edit(() => (pane.name = next))}
+            validate={(next) => paneNameProblem(tab.document, pane.id, next)}
           />
         </Field>
         <Row>
@@ -856,49 +859,71 @@ function useDraftReset(
 function TextField({
   value,
   maxLength,
-  onChange
+  onChange,
+  validate
 }: {
   value: string
   maxLength: number
   onChange: (value: string) => void
+  /** Returns why the value is unacceptable, or null when it is fine. */
+  validate?: (value: string) => string | null
 }): ReactNode {
   const [draft, setDraft] = useState<string | null>(null)
   // See NumberField: blur fires synchronously from blur(), before React flushes.
   const cancelling = useRef(false)
   useDraftReset(value, draft, setDraft)
 
+  /**
+   * Why the pending draft cannot be committed, or null.
+   *
+   * Kept visible while the draft stands rather than reverting silently, so a rejected
+   * rename says what is wrong instead of appearing to do nothing.
+   */
+  const problem = draft === null ? null : (validate?.(draft.slice(0, maxLength)) ?? null)
+
   const commit = (text: string): void => {
-    setDraft(null)
     if (cancelling.current) {
       cancelling.current = false
+      setDraft(null)
       return
     }
     const trimmed = text.slice(0, maxLength)
+    // A rejected value stays in the field so it can be corrected.
+    if (validate?.(trimmed)) return
+    setDraft(null)
     if (trimmed !== value) onChange(trimmed)
   }
 
   return (
-    <input
-      value={draft ?? value}
-      maxLength={maxLength}
-      onChange={(event) => setDraft(event.target.value)}
-      onBlur={(event) => commit(event.target.value)}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter') {
-          event.preventDefault()
-          commit(event.currentTarget.value)
-          event.currentTarget.blur()
-          return
-        }
-        if (event.key === 'Escape') {
-          event.preventDefault()
-          cancelling.current = true
-          setDraft(null)
-          event.currentTarget.blur()
-        }
-      }}
-      className="w-full rounded border bg-input/40 px-1.5 py-0.5"
-    />
+    <>
+      <input
+        value={draft ?? value}
+        maxLength={maxLength}
+        aria-invalid={problem !== null}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={(event) => commit(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            commit(event.currentTarget.value)
+            if (!validate?.(event.currentTarget.value.slice(0, maxLength))) {
+              event.currentTarget.blur()
+            }
+            return
+          }
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            cancelling.current = true
+            setDraft(null)
+            event.currentTarget.blur()
+          }
+        }}
+        className={`w-full rounded border bg-input/40 px-1.5 py-0.5 ${
+          problem ? 'border-destructive' : ''
+        }`}
+      />
+      {problem ? <p className="mt-0.5 text-[10px] text-destructive">{problem}</p> : null}
+    </>
   )
 }
 

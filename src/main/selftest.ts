@@ -1219,6 +1219,73 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * A rename cannot collide with another pane's name. Animations resolve their targets
+   * by name, so two panes sharing one makes a single animation drive both — the exact
+   * invariant duplicatePane protects, which the rename field could otherwise undo.
+   */
+  const nameClash = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    const siblings = tab.document.rootPane.children
+    if (siblings.length < 2) return { error: 'need two panes to collide' }
+    const [first, second] = siblings
+    store.select([first.id])
+    await new Promise(r => setTimeout(r, 300))
+
+    const input = [...document.querySelectorAll('aside input')].find(i => i.value === first.name)
+    if (!input) return { error: 'no name field for the selected pane' }
+
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value'
+    ).set
+    setter.call(input, second.name)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await new Promise(r => setTimeout(r, 250))
+
+    const warned = !!document.querySelector('aside [aria-invalid="true"]')
+
+    input.focus()
+    input.blur()
+    await new Promise(r => setTimeout(r, 300))
+
+    const now = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+    const findById = (p, id) =>
+      p.id === id ? p : p.children.reduce((f, c) => f || findById(c, id), null)
+    const nameAfter = findById(now.document.rootPane, first.id).name
+
+    /*
+     * Abandon the rejected draft with Escape. A rejected value deliberately stays in the
+     * field so it can be corrected, which means leaving it there changes what the next
+     * check sees — the field no longer shows the pane's name.
+     */
+    input.focus()
+    input.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape', bubbles: true, cancelable: true
+    }))
+    await new Promise(r => setTimeout(r, 250))
+
+    return { warned, nameAfter, wanted: second.name }
+  })()`)) as {
+    error?: string
+    warned?: boolean
+    nameAfter?: string
+    wanted?: string
+  }
+
+  if (nameClash.error) {
+    check(false, `name clash: ${nameClash.error}`)
+  } else {
+    check(nameClash.warned === true, 'a colliding rename is marked invalid while it is typed')
+    check(
+      nameClash.nameAfter !== nameClash.wanted,
+      `blurring did not apply the colliding name (still ${nameClash.nameAfter})`
+    )
+  }
+
+  /*
    * Renaming is one undo entry, not one per keystroke. Committing per character meant
    * a twenty-character rename cost twenty presses of Cmd+Z and evicted twenty real
    * entries from the 200-deep stack.

@@ -8,12 +8,14 @@ import {
 } from '@shared/formats/bflyt/create'
 import type { LayoutDocument, TextPane } from '@shared/formats/bflyt'
 import {
+  PANE_NAME_BYTES,
   addPane,
   composeCommands,
   contains,
   deletePane,
   duplicatePane,
   movePane,
+  paneNameProblem,
   placementOf,
   resolveMove,
   setMaterialSnapshot,
@@ -526,5 +528,65 @@ describe('placement helpers', () => {
     expect(contains(document, parent.id, parent.id)).toBe(true)
     expect(contains(document, parent.id, grandchild.id)).toBe(true)
     expect(contains(document, child.id, parent.id)).toBe(false)
+  })
+})
+
+/**
+ * Pane-name uniqueness.
+ *
+ * Animations and groups address panes by name (`bflan/overrides.ts` resolves every
+ * animated target that way), so two panes sharing one makes a single animation drive
+ * both. `duplicatePane` protects this; the rename field validates against the same rule.
+ */
+describe('paneNameProblem', () => {
+  function withNames(names: readonly string[]): { document: LayoutDocument; ids: string[] } {
+    const document = createLayoutDocument()
+    const ids: string[] = []
+    for (const name of names) {
+      const pane = createPicturePane(name)
+      document.rootPane!.children.push(pane)
+      ids.push(pane.id)
+    }
+    return { document, ids }
+  }
+
+  it('accepts a name nothing else uses', () => {
+    const { document, ids } = withNames(['A', 'B'])
+    expect(paneNameProblem(document, ids[0]!, 'Fresh')).toBeNull()
+  })
+
+  it('accepts a pane keeping its own name', () => {
+    const { document, ids } = withNames(['A', 'B'])
+    expect(paneNameProblem(document, ids[0]!, 'A')).toBeNull()
+  })
+
+  it('rejects a name another pane already has', () => {
+    const { document, ids } = withNames(['A', 'B'])
+    expect(paneNameProblem(document, ids[0]!, 'B')).toMatch(/already called "B"/)
+  })
+
+  it('rejects a name that only differs past the stored width', () => {
+    /*
+     * The writer truncates to 24 bytes without complaint, so two names differing only
+     * past that point are the same name on disk — the failure this is really guarding.
+     */
+    const long = 'ButtonWithAVeryLongName1'
+    expect(long).toHaveLength(PANE_NAME_BYTES)
+    const { document, ids } = withNames([long, 'Other'])
+    const collides = `${long}DIFFERENT`
+    expect(paneNameProblem(document, ids[1]!, collides)).toMatch(/once truncated/)
+  })
+
+  it('allows an empty name, which shipped layouts contain', () => {
+    const { document, ids } = withNames(['', 'B'])
+    expect(paneNameProblem(document, ids[1]!, '')).toBeNull()
+  })
+
+  it('agrees with duplicatePane, so the two rules cannot drift', () => {
+    // Whatever duplicate produces must pass the rename validation.
+    const { document, ids } = withNames(['Btn'])
+    duplicatePane(document, ids[0]!)!.apply(document)
+    const copy = document.rootPane!.children[1]!
+    expect(paneNameProblem(document, copy.id, copy.name)).toBeNull()
   })
 })

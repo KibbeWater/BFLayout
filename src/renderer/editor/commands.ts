@@ -184,7 +184,39 @@ export function setMaterialSnapshot(
  * The fixed width of a pane's name field, which the writer truncates to.
  * See `writeBase` in shared/formats/bflyt/panes.ts.
  */
-const PANE_NAME_BYTES = 0x18
+export const PANE_NAME_BYTES = 0x18
+
+/**
+ * Why a pane cannot take this name, or null when it can.
+ *
+ * Names are how animations and groups address panes — `bflan/overrides.ts` resolves
+ * every animated target by name — so two panes sharing one makes a single animation
+ * drive both. `duplicatePane` goes to some length to avoid that; the rename field could
+ * undo all of it, so it validates against the same rule.
+ *
+ * The comparison is on the *stored* form, because the writer truncates silently: two
+ * names differing only past 24 characters are the same name on disk. Empty is allowed —
+ * shipped layouts contain unnamed panes, and they simply cannot be animated.
+ */
+export function paneNameProblem(
+  document: LayoutDocument,
+  paneId: string,
+  name: string
+): string | null {
+  const stored = name.slice(0, PANE_NAME_BYTES)
+  if (stored === '') return null
+
+  let clash: string | null = null
+  walkPanes(document.rootPane, (candidate) => {
+    if (clash !== null || candidate.id === paneId) return
+    if (candidate.name.slice(0, PANE_NAME_BYTES) === stored) clash = candidate.name
+  })
+
+  if (clash === null) return null
+  return name.length > PANE_NAME_BYTES
+    ? `Another pane is already "${clash}" once truncated to ${PANE_NAME_BYTES} characters.`
+    : `Another pane is already called "${clash}". Animations address panes by name.`
+}
 
 /**
  * Copies a pane and its subtree in beside the original.
