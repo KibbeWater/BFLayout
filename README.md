@@ -20,6 +20,7 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | Align and distribute a multi-pane selection | Working |
 | Filter the pane hierarchy by name or kind | Working |
 | Zoom readout (click for 1:1) | Working |
+| Canvas context menu (right click) | Working — right drag still pans |
 | Keyboard editing (nudge, delete, duplicate, undo) | Working — see Keyboard |
 | BYML documents | Read-only tree viewer (v1–7, both byte orders) |
 | Session restore | Offers the previous session on launch |
@@ -68,6 +69,7 @@ this, and what the remaining 0.9% is.
 | Alt while dragging | Suspend grid snapping and alignment guides |
 | Two-finger scroll | Pan; pinch or ⌘-scroll zooms at the cursor |
 | Click the same spot again | Select the pane *behind* the one you just got |
+| Right click | Context menu; right *drag* still pans |
 
 Nudge, delete and duplicate act on the whole selection as **one** undo entry, so a
 twenty-pane drag is one press of ⌘Z rather than twenty.

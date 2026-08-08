@@ -652,18 +652,28 @@ export class LayoutRenderer {
     const bottom = camera.y - halfHeight
     const top = camera.y + halfHeight
 
-    // Skip drawing when the grid would be denser than a few pixels per line.
-    if ((right - left) / gridSize > 400) return
+    /*
+     * Coarsen rather than disappear.
+     *
+     * This used to return early once the grid exceeded 400 divisions, so zooming out far
+     * enough made the grid vanish while its toolbar toggle stayed lit — the UI claiming
+     * something that was not on screen. Stepping up by powers of two keeps the lines a
+     * useful distance apart at any zoom and keeps every drawn line on a multiple of the
+     * authored grid, so what is shown still means something.
+     */
+    const MAX_DIVISIONS = 400
+    let step = gridSize
+    while ((right - left) / step > MAX_DIVISIONS) step *= 2
 
     const color = [1, 1, 1, 0.05]
     const axisColor = [1, 1, 1, 0.16]
 
-    const startX = Math.floor(left / gridSize) * gridSize
-    for (let x = startX; x <= right; x += gridSize) {
+    const startX = Math.floor(left / step) * step
+    for (let x = startX; x <= right; x += step) {
       this.line([x, bottom], [x, top], x === 0 ? axisColor : color)
     }
-    const startY = Math.floor(bottom / gridSize) * gridSize
-    for (let y = startY; y <= top; y += gridSize) {
+    const startY = Math.floor(bottom / step) * step
+    for (let y = startY; y <= top; y += step) {
       this.line([left, y], [right, y], y === 0 ? axisColor : color)
     }
   }

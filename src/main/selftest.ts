@@ -1219,6 +1219,104 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * The canvas context menu. Duplicate, delete and the tree moves were keyboard-only,
+   * which for most people means undiscoverable. Right-drag still pans, so the menu opens
+   * on a right *click* — a distinction worth testing, because it is the whole design.
+   */
+  const contextMenu = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    const canvases = [...document.querySelectorAll('canvas')]
+    const surface = canvases.sort(
+      (a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width
+    )[0]
+    const container = surface && surface.parentElement
+    if (!container) return { error: 'no canvas container' }
+    const box = surface.getBoundingClientRect()
+    const cx = box.left + box.width / 2
+    const cy = box.top + box.height / 2
+
+    const fire = (type, x, y, button) => container.dispatchEvent(
+      new PointerEvent(type, {
+        clientX: x, clientY: y, bubbles: true, cancelable: true,
+        pointerId: 3, isPrimary: true, button: button ?? 0, buttons: button === 2 ? 2 : 1
+      })
+    )
+    const menu = () => document.querySelector('[role="menu"]')
+
+    // A right *drag* must pan, not open the menu.
+    fire('pointerdown', cx, cy, 2)
+    fire('pointermove', cx + 40, cy, 2)
+    container.dispatchEvent(new MouseEvent('contextmenu', {
+      clientX: cx + 40, clientY: cy, bubbles: true, cancelable: true
+    }))
+    await new Promise(r => setTimeout(r, 200))
+    const afterDrag = !!menu()
+    fire('pointerup', cx + 40, cy, 2)
+    await new Promise(r => setTimeout(r, 150))
+
+    // A right *click* must open it.
+    fire('pointerdown', cx, cy, 2)
+    container.dispatchEvent(new MouseEvent('contextmenu', {
+      clientX: cx, clientY: cy, bubbles: true, cancelable: true
+    }))
+    await new Promise(r => setTimeout(r, 250))
+    const opened = !!menu()
+    const labels = opened
+      ? [...menu().querySelectorAll('[role="menuitem"]')].map(b => b.textContent)
+      : []
+
+    // Duplicating through the menu must actually add a pane.
+    const before = (() => {
+      const count = (p) => 1 + p.children.reduce((n, k) => n + count(k), 0)
+      return count(tab.document.rootPane)
+    })()
+    const dup = opened
+      ? [...menu().querySelectorAll('[role="menuitem"]')]
+          .find(b => b.textContent.includes('Duplicate'))
+      : null
+    if (dup) dup.click()
+    await new Promise(r => setTimeout(r, 350))
+
+    const now = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+    const count = (p) => 1 + p.children.reduce((n, k) => n + count(k), 0)
+    const after = count(now.document.rootPane)
+    const closed = !menu()
+
+    // Leave the tree as it was.
+    dev.documents.getState().undo()
+    await new Promise(r => setTimeout(r, 250))
+
+    return { afterDrag, opened, items: labels.length, before, after, closed }
+  })()`)) as {
+    error?: string
+    afterDrag?: boolean
+    opened?: boolean
+    items?: number
+    before?: number
+    after?: number
+    closed?: boolean
+  }
+
+  if (contextMenu.error) {
+    check(false, `context menu: ${contextMenu.error}`)
+  } else {
+    check(contextMenu.afterDrag === false, 'a right drag pans instead of opening the menu')
+    check(
+      contextMenu.opened === true && (contextMenu.items ?? 0) >= 5,
+      `a right click opened the menu with ${contextMenu.items} items`
+    )
+    check(
+      (contextMenu.after ?? 0) > (contextMenu.before ?? 0),
+      `Duplicate from the menu added a pane (${contextMenu.before} -> ${contextMenu.after})`
+    )
+    check(contextMenu.closed === true, 'choosing an action closed the menu')
+  }
+
+  /*
    * Crash-recovery snapshots. The close and quit prompts cover a deliberate exit; this
    * is what stands between a crash and losing every edit since the last save.
    */

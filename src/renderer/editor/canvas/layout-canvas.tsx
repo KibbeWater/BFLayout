@@ -162,6 +162,8 @@ export function LayoutCanvas(): ReactNode {
    * The last click point and how far down the overlapping stack it reached, so a
    * second click at the same spot selects the pane underneath.
    */
+  /** Where a right-press started, so a right-drag is not mistaken for a right-click. */
+  const panStartRef = useRef<{ x: number; y: number } | null>(null)
   const cycleRef = useRef<{
     x: number
     y: number
@@ -199,6 +201,8 @@ export function LayoutCanvas(): ReactNode {
   /** Marquee and guides live in React state because they are drawn as overlays. */
   const [marquee, setMarquee] = useState<MarqueeState | null>(null)
   const [guides, setGuides] = useState<readonly Guide[]>([])
+  /** Where the context menu is open, in client coordinates, or null. */
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null)
 
   const tab = useActiveTab()
   // Playback drives redraws through this: the overrides object is replaced on
@@ -644,6 +648,9 @@ export function LayoutCanvas(): ReactNode {
 
     // Middle button or space-less right drag pans the view.
     if (event.button === 1 || event.button === 2) {
+      // Remembered so `onContextMenu` can tell a right-click from a right-drag: the
+      // former opens the menu, the latter pans, and both start the same way.
+      if (event.button === 2) panStartRef.current = { x: event.clientX, y: event.clientY }
       panRef.current = { x: event.clientX, y: event.clientY }
       capturePointer(event)
       return
@@ -1202,9 +1209,57 @@ export function LayoutCanvas(): ReactNode {
         onPointerMove={onPointerMove}
         onPointerUp={endInteraction}
         onPointerCancel={endInteraction}
-        onContextMenu={(event) => event.preventDefault()}
+        onContextMenu={(event) => {
+          event.preventDefault()
+          /*
+           * A right *click* opens the menu; a right *drag* pans.
+           *
+           * Right-drag panning is worth keeping, so the menu cannot simply take the
+           * button. The browser fires contextmenu after the press, by which point the
+           * distance travelled says which gesture it was.
+           */
+          const start = panStartRef.current
+          panStartRef.current = null
+          if (
+            start &&
+            Math.abs(event.clientX - start.x) + Math.abs(event.clientY - start.y) > 3
+          ) {
+            return
+          }
+
+          const [x, y] = toLayout(event.clientX, event.clientY)
+          const renderer = rendererRef.current
+          const hit = renderer
+            ? hitTestAll(renderer.flattened, x, y, { includeHidden: showInvisible })[0]
+            : undefined
+          // Right-clicking a pane that is not selected selects it first, which is what
+          // every editor does and what makes the menu's actions unambiguous.
+          if (hit && !tab.selectedPaneIds.includes(hit.pane.id)) select([hit.pane.id])
+          setMenuAt({ x: event.clientX, y: event.clientY })
+        }}
       >
         <canvas ref={attachCanvas} className="absolute inset-0 size-full" />
+        {menuAt ? (
+          <CanvasMenu
+            at={menuAt}
+            container={containerRef.current}
+            selection={tab.selectedPaneIds}
+            canMove={(move) =>
+              tab.selectedPaneIds.some(
+                (id) => resolveMove(tab.document, id, move) !== null
+              )
+            }
+            onClose={() => setMenuAt(null)}
+            onDuplicate={() => duplicateSelection(tab.selectedPaneIds)}
+            onDelete={() => deleteSelection(tab.selectedPaneIds)}
+            onMove={(move) => moveSelection(tab.selectedPaneIds, move)}
+            onSelectParent={() => {
+              const first = tab.selectedPaneIds[0]
+              const parent = first ? parentOf(tab.document, first) : null
+              if (parent) select([parent.id])
+            }}
+          />
+        ) : null}
         {showTextures && textureFailures.length > 0 ? (
           <TextureFailureNotice failures={textureFailures} />
         ) : null}
@@ -1506,3 +1561,120 @@ function findById(pane: Pane | null, id: string): Pane | null {
   }
   return null
 }
+
+/**
+ * The canvas context menu.
+ *
+ * The natural home for the actions that were keyboard-only — duplicate, delete, the tree
+ * moves — none of which anyone would find behind a modifier they had not been told about.
+ * Positioned in client coordinates and clamped to the container so it cannot open off the
+ * edge.
+ *
+ * Dismissed on any pointer-down elsewhere, on scroll, and on Escape, because a menu that
+ * outlives its context is worse than no menu.
+ */
+function CanvasMenu({
+  at,
+  container,
+  selection,
+  canMove,
+  onClose,
+  onDuplicate,
+  onDelete,
+  onMove,
+  onSelectParent
+}: {
+  at: { x: number; y: number }
+  container: HTMLElement | null
+  selection: readonly string[]
+  canMove: (move: PaneMove) => boolean
+  onClose: () => void
+  onDuplicate: () => void
+  onDelete: () => void
+  onMove: (move: PaneMove) => void
+  onSelectParent: () => void
+}): ReactNode {
+  useEffect(() => {
+    const dismiss = (): void => onClose()
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') onClose()
+    }
+    // Capture, so a click on a pane closes the menu before it starts a new gesture.
+    window.addEventListener('pointerdown', dismiss, { capture: true })
+    window.addEventListener('wheel', dismiss, { passive: true })
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', dismiss, { capture: true })
+      window.removeEventListener('wheel', dismiss)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [onClose])
+
+  const box = container?.getBoundingClientRect()
+  const left = box ? Math.min(at.x - box.left, box.width - MENU_WIDTH) : at.x
+  const top = box ? Math.min(at.y - box.top, box.height - MENU_HEIGHT) : at.y
+
+  const empty = selection.length === 0
+  const run = (action: () => void): void => {
+    action()
+    onClose()
+  }
+
+  const items: readonly {
+    label: string
+    keys: string
+    disabled: boolean
+    action: () => void
+  }[] = [
+    { label: 'Duplicate', keys: 'Cmd+D', disabled: empty, action: onDuplicate },
+    { label: 'Delete', keys: 'Del', disabled: empty, action: onDelete },
+    {
+      label: 'Bring forward',
+      keys: 'Alt+Up',
+      disabled: empty || !canMove('raise'),
+      action: () => onMove('raise')
+    },
+    {
+      label: 'Send backward',
+      keys: 'Alt+Down',
+      disabled: empty || !canMove('lower'),
+      action: () => onMove('lower')
+    },
+    { label: 'Select parent', keys: '', disabled: empty, action: onSelectParent }
+  ]
+
+  return (
+    <div
+      role="menu"
+      style={{ left: Math.max(0, left), top: Math.max(0, top), width: MENU_WIDTH }}
+      className="absolute z-20 overflow-hidden rounded-md border bg-popover py-1 shadow-lg"
+      // The menu is inside the canvas container, whose own handlers would otherwise
+      // treat a click on it as a click on the canvas.
+      onPointerDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      {empty ? (
+        <p className="px-2 py-1 text-[11px] text-muted-foreground">Nothing selected</p>
+      ) : null}
+      {items.map((item) => (
+        <button
+          key={item.label}
+          type="button"
+          role="menuitem"
+          disabled={item.disabled}
+          onClick={() => run(item.action)}
+          className="flex w-full items-center gap-3 px-2 py-1 text-left text-xs hover:bg-accent disabled:opacity-40 disabled:hover:bg-transparent"
+        >
+          <span className="flex-1">{item.label}</span>
+          {item.keys ? (
+            <span className="font-mono text-[10px] text-muted-foreground/60">{item.keys}</span>
+          ) : null}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+const MENU_WIDTH = 190
+/** Roughly five rows plus padding; only used to keep the menu inside the canvas. */
+const MENU_HEIGHT = 130
