@@ -25,6 +25,23 @@ interface Entry {
   detail: string | null
 }
 
+/**
+ * How many source-scoped caches to keep.
+ *
+ * Cached across sources rather than dropped on every switch: alternating between two
+ * layouts used to refetch and re-upload every texture each time, which for an archive
+ * with a couple of dozen is a visible stall on a tab click. Bounded because each entry
+ * holds GPU memory — the least recently used source is released when a new one arrives.
+ */
+const CACHED_SOURCES = 4
+
+/** Stable identity for a layout source, used as the cache key. */
+function sourceKey(source: LayoutSource): string {
+  return source.kind === 'file'
+    ? `file:${source.path}`
+    : `archive:${source.archiveId}:${source.entryKey}`
+}
+
 /** A 2x2 magenta/black checker, the traditional "this texture is wrong" marker. */
 const PLACEHOLDER_PIXELS = new Uint8Array([
   255, 0, 255, 255, 40, 0, 40, 255, 40, 0, 40, 255, 255, 0, 255, 255
@@ -35,7 +52,11 @@ export class TextureStore {
   private disposed = false
   private readonly gl: WebGL2RenderingContext
   private readonly onChanged: () => void
-  private readonly entries = new Map<string, Entry>()
+  /**
+   * Per-source caches, most recently used last. Insertion order is the LRU order,
+   * which Map preserves and re-establishes on delete-then-set.
+   */
+  private readonly bySource = new Map<string, Map<string, Entry>>()
 
   /** Bound wherever a draw call has no texture of its own. */
   readonly white: WebGLTexture
@@ -52,14 +73,52 @@ export class TextureStore {
   }
 
   /**
-   * Points the store at the layout whose textures should be resolved. Changing
-   * source drops everything: the same texture name in a different archive is a
-   * different texture.
+   * Points the store at the layout whose textures should be resolved.
+   *
+   * Each source keeps its own cache — the same texture name in a different archive is a
+   * different texture — and switching between them is free until the bound is reached.
    */
   setSource(source: LayoutSource | null): void {
     if (sameSource(this.source, source)) return
     this.source = source
-    this.clearEntries()
+    if (!source) return
+
+    const key = sourceKey(source)
+    const existing = this.bySource.get(key)
+    // Re-inserting moves it to the most-recent end of the LRU order.
+    if (existing) {
+      this.bySource.delete(key)
+      this.bySource.set(key, existing)
+      return
+    }
+
+    this.bySource.set(key, new Map())
+    while (this.bySource.size > CACHED_SOURCES) {
+      const oldest = this.bySource.keys().next()
+      if (oldest.done) break
+      const dropped = this.bySource.get(oldest.value)
+      if (dropped) this.release(dropped)
+      this.bySource.delete(oldest.value)
+    }
+  }
+
+  /** The cache for the current source, or an empty one when there is none. */
+  private get entries(): Map<string, Entry> {
+    const key = this.source ? sourceKey(this.source) : null
+    if (key === null) return EMPTY_ENTRIES
+    let store = this.bySource.get(key)
+    if (!store) {
+      store = new Map()
+      this.bySource.set(key, store)
+    }
+    return store
+  }
+
+  private release(entries: Map<string, Entry>): void {
+    for (const entry of entries.values()) {
+      if (entry.texture) this.gl.deleteTexture(entry.texture)
+    }
+    entries.clear()
   }
 
   /**
@@ -182,10 +241,8 @@ export class TextureStore {
   }
 
   private clearEntries(): void {
-    for (const entry of this.entries.values()) {
-      if (entry.texture) this.gl.deleteTexture(entry.texture)
-    }
-    this.entries.clear()
+    for (const entries of this.bySource.values()) this.release(entries)
+    this.bySource.clear()
   }
 
   dispose(): void {
@@ -206,3 +263,6 @@ function sameSource(a: LayoutSource | null, b: LayoutSource | null): boolean {
   }
   return false
 }
+
+/** Shared empty map, returned when there is no source to key a cache by. */
+const EMPTY_ENTRIES = new Map<string, Entry>()

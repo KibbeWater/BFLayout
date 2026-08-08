@@ -1219,6 +1219,58 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * Switching layouts and coming back keeps the GPU textures. They used to be dropped
+   * on every source change, so alternating between two tabs refetched and re-uploaded
+   * every texture each time — a visible stall on a tab click.
+   */
+  const textureCache = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    const textures = dev.renderer && dev.renderer.textures
+    if (!textures) return { error: 'no texture store on the renderer' }
+
+    // Wait for at least one texture to be resolved for this layout.
+    const names = tab.document.textures
+    if (names.length === 0) return { error: 'the layout references no textures' }
+    let ready = null
+    for (let i = 0; i < 60 && !ready; i++) {
+      await new Promise(r => setTimeout(r, 100))
+      ready = names.find(n => {
+        const state = textures.stateOf(n)
+        return state && state.state === 'ready'
+      })
+    }
+    if (!ready) return { error: 'no texture became ready' }
+
+    // Point the store elsewhere and back, the way a tab switch does.
+    textures.setSource({ kind: 'file', path: '/nowhere/else.bflyt' })
+    const whileAway = textures.stateOf(ready)
+    textures.setSource(tab.source)
+    const afterReturn = textures.stateOf(ready)
+
+    return {
+      name: ready,
+      away: whileAway ? whileAway.state : 'absent',
+      back: afterReturn ? afterReturn.state : 'absent'
+    }
+  })()`)) as { error?: string; name?: string; away?: string; back?: string }
+
+  if (textureCache.error) {
+    check(false, `texture cache: ${textureCache.error}`)
+  } else {
+    // A different source must not see the first one's textures...
+    check(textureCache.away === 'absent', `another layout does not see ${textureCache.name}`)
+    // ...and coming back must not have to fetch it again.
+    check(
+      textureCache.back === 'ready',
+      `returning found ${textureCache.name} still on the GPU (${textureCache.back})`
+    )
+  }
+
+  /*
    * A rename cannot collide with another pane's name. Animations resolve their targets
    * by name, so two panes sharing one makes a single animation drive both — the exact
    * invariant duplicatePane protects, which the rename field could otherwise undo.
