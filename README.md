@@ -14,8 +14,10 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | Materials (colours, blend, alpha compare, texture maps) | Editable |
 | Window panes (nine-slice / pinwheel frames) | Working |
 | Text panes | Preview only — system font, not BFFNT |
-| Undo / redo | Working (transform, property, material, add/delete) |
-| Add / delete pane, grid snapping | Working |
+| Undo / redo | Working — every edit, including property, material and visibility |
+| Add / delete / duplicate pane, grid snapping | Working |
+| Keyboard editing (nudge, delete, duplicate, undo) | Working — see Keyboard |
+| BYML documents | Read-only tree viewer (v1–7, both byte orders) |
 | Session restore | Offers the previous session on launch |
 | BNTX textures | Decode and preview (BC1–BC5, all ASTC LDR block sizes, uncompressed; no BC6H/BC7) |
 | BFLAN animation | Parse, play, scrub, inspect keyframes (no keyframe editing) |
@@ -39,6 +41,27 @@ romfs dump (Switch, v1.0.4) is parsed and rewritten byte for byte:
 
 See [Validating against real files](#validating-against-real-files) for how to run
 this, and what the remaining 0.9% is.
+
+### Keyboard
+
+| Keys | What |
+| --- | --- |
+| Arrows | Nudge the selection by 1 |
+| Shift + arrows | Nudge by 10 |
+| Delete / Backspace | Delete the selection |
+| ⌘D | Duplicate the selection beside itself |
+| Escape | Clear the selection |
+| ⌘Z / ⌘⇧Z | Undo / redo |
+| ⌘S / ⌘⇧S | Save / save as |
+| ⌘O / ⌘⇧O | Open a file / open a folder |
+| ⌘1–⌘4 | Toggle the sidebar, hierarchy, properties, timeline |
+| ⌘0 | Canvas only |
+| ⌘F | Fit the layout to the view |
+| Alt while dragging | Suspend grid snapping and alignment guides |
+| Two-finger scroll | Pan; pinch or ⌘-scroll zooms at the cursor |
+
+Nudge and delete act on the whole selection as **one** undo entry, so a
+twenty-pane drag is one press of ⌘Z rather than twenty.
 
 ## Requirements
 
@@ -67,6 +90,9 @@ pnpm test            # unit tests
 pnpm build           # production bundle
 pnpm package         # distributable via electron-builder
 pnpm fixture:archive out.szs [yaz0|zstd|none]   # synthesize a test archive
+pnpm validate:romfs /path/to/romfs              # re-encode every file and compare
+pnpm validate:byml  /path/to/romfs              # parse every BYML document
+pnpm validate:astc  /path/to/vectors            # compare ASTC against astcenc
 ```
 
 ## Architecture
