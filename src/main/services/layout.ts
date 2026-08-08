@@ -45,19 +45,28 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
       source.kind === 'file' ? basename(source.path) : source.entryKey.split('/').pop()!
 
     /**
-     * The path-based identity of a source, for keying anything that outlives the
-     * process. An archive source carries a session-local `archiveId`, so this resolves
-     * it to the archive's actual path.
+     * The path-based identity of a source, for keying anything that outlives the process.
+     * An archive source carries a session-local `archiveId`, so this resolves it to the
+     * archive's actual path.
+     *
+     * Never fails. An archive can be closed while a layout from it is still open, and an
+     * unresolvable key is not a reason for `save` to refuse to write or for `list` to
+     * refuse to answer — both used to, the moment one session's archive went away. The
+     * empty string means "no durable identity", which callers already handle: the renderer
+     * reports that such a tab cannot be snapshotted rather than sending an invalid request.
      */
-    const durableKey = (source: LayoutSource): Effect.Effect<string, NotFoundError> =>
+    const durableKey = (source: LayoutSource): Effect.Effect<string> =>
       source.kind === 'file'
         ? Effect.succeed(snapshotKeyFor({ kind: 'file', path: source.path }))
-        : Effect.map(archives.describeOne(source.archiveId), (descriptor) =>
-            snapshotKeyFor({
-              kind: 'archive',
-              archivePath: descriptor.path,
-              entryKey: source.entryKey
-            })
+        : Effect.orElseSucceed(
+            Effect.map(archives.describeOne(source.archiveId), (descriptor) =>
+              snapshotKeyFor({
+                kind: 'archive',
+                archivePath: descriptor.path,
+                entryKey: source.entryKey
+              })
+            ),
+            () => ''
           )
 
     const readBytes = (
@@ -351,17 +360,26 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
         open.delete(documentId)
       })
 
-    const list = Effect.forEach(
-      // Snapshot the sessions first: durableKey can suspend, and an archive lookup
-      // resolving mid-iteration should not see a half-mutated map.
-      [...open.values()],
-      (entry) =>
+    /*
+     * Suspended, which is not optional here.
+     *
+     * `Effect.forEach([...open.values()], …)` spreads the map when the *service* is built,
+     * not when the effect runs — and the service layer is memoised and constructed once, at
+     * which point no documents are open. So the effect closed over an empty array forever
+     * and `list` returned `[]` for every call, which no error surfaced anywhere: the caller
+     * that resyncs recovery keys after an archive save-as simply applied an empty map and
+     * left every key naming the old path. The previous `Effect.sync(() => …)` was lazy for
+     * the same reason; this restores that.
+     */
+    const list = Effect.suspend(() =>
+      Effect.forEach([...open.values()], (entry) =>
         Effect.map(durableKey(entry.source), (snapshotKey) => ({
           documentId: entry.id,
           displayName: entry.displayName,
           source: entry.source,
           snapshotKey
         }))
+      )
     )
 
     return { openLayout, restore, save, close, list, get, parts } as const

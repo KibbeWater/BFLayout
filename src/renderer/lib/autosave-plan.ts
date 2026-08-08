@@ -17,6 +17,8 @@
  */
 
 export interface AutosaveTab {
+  /** Identifies the tab itself, so a plan names *which* tab's document to serialise. */
+  readonly documentId: string
   readonly snapshotKey: string
   readonly displayName: string
   readonly unsaved: boolean
@@ -32,7 +34,8 @@ export interface AutosaveMemory {
 }
 
 export interface AutosavePlan {
-  readonly put: { key: string; displayName: string }[]
+  /** `documentId` says whose document to send: the key alone is ambiguous. */
+  readonly put: { key: string; documentId: string; displayName: string }[]
   readonly remove: string[]
   /** Tabs with no durable key, which cannot be snapshotted; named so it can be reported. */
   readonly unkeyed: string[]
@@ -46,30 +49,51 @@ export function planAutosave(
   tabs: readonly AutosaveTab[],
   memory: AutosaveMemory
 ): AutosavePlan {
-  const put: { key: string; displayName: string }[] = []
+  const put: { key: string; documentId: string; displayName: string }[] = []
   const remove: string[] = []
   const unkeyed: string[] = []
   const live = new Set<string>()
 
+  /*
+   * Grouped by key before deciding anything.
+   *
+   * A key is a *file*, and a file can have more than one tab on it — edit a layout, then
+   * click it again in the archive browser and a clean duplicate opens beside the dirty one.
+   * Deciding per tab then emitted a put and a remove for the same key in one plan, and
+   * whichever landed last won: the dirty tab's edits ended up with no snapshot at all,
+   * every single flush. The rule has to be about the file: while *any* tab on it holds
+   * unsaved edits there is work to protect, and only when none do is the disk copy better.
+   */
+  const byKey = new Map<string, AutosaveTab[]>()
   for (const tab of tabs) {
     if (!tab.snapshotKey) {
       unkeyed.push(tab.displayName)
       continue
     }
     live.add(tab.snapshotKey)
+    const group = byKey.get(tab.snapshotKey)
+    if (group) group.push(tab)
+    else byKey.set(tab.snapshotKey, [tab])
+  }
 
-    if (tab.unsaved) {
-      memory.everDirty.add(tab.snapshotKey)
-      if (memory.written.get(tab.snapshotKey) === tab.revision) continue
-      memory.written.set(tab.snapshotKey, tab.revision)
-      put.push({ key: tab.snapshotKey, displayName: tab.displayName })
+  for (const [key, group] of byKey) {
+    // The most recently edited unsaved tab is the one whose work is worth keeping.
+    const dirty = group
+      .filter((tab) => tab.unsaved)
+      .sort((a, b) => b.revision - a.revision)[0]
+
+    if (dirty) {
+      memory.everDirty.add(key)
+      if (memory.written.get(key) === dirty.revision) continue
+      memory.written.set(key, dirty.revision)
+      put.push({ key, documentId: dirty.documentId, displayName: dirty.displayName })
       continue
     }
 
-    // Clean now, dirty earlier: the file on disk is the better copy.
-    if (memory.everDirty.has(tab.snapshotKey) && memory.written.get(tab.snapshotKey) !== -1) {
-      memory.written.set(tab.snapshotKey, -1)
-      remove.push(tab.snapshotKey)
+    // No tab on this file has unsaved work: the file on disk is the better copy.
+    if (memory.everDirty.has(key) && memory.written.get(key) !== -1) {
+      memory.written.set(key, -1)
+      remove.push(key)
     }
   }
 
@@ -94,15 +118,22 @@ export function shouldReschedule(
   tabs: readonly AutosaveTab[],
   seen: Map<string, number>
 ): boolean {
-  // Against the distinct keys, not the tab count: two tabs on one file would otherwise
-  // make this true forever.
-  const keys = new Set(tabs.map((tab) => tab.snapshotKey))
-  let changed = keys.size !== seen.size
+  /*
+   * Per file, matching what `planAutosave` decides on. Marking per tab made a mixed
+   * dirty/clean pair on one file flip its mark between the revision and -1 on every pass,
+   * so this returned true forever and the debounce never settled.
+   */
+  const marks = new Map<string, number>()
   for (const tab of tabs) {
     const mark = tab.unsaved ? tab.revision : -1
-    if (seen.get(tab.snapshotKey) !== mark) changed = true
-    seen.set(tab.snapshotKey, mark)
+    marks.set(tab.snapshotKey, Math.max(marks.get(tab.snapshotKey) ?? -1, mark))
   }
-  for (const key of [...seen.keys()]) if (!keys.has(key)) seen.delete(key)
+
+  let changed = marks.size !== seen.size
+  for (const [key, mark] of marks) {
+    if (seen.get(key) !== mark) changed = true
+    seen.set(key, mark)
+  }
+  for (const key of [...seen.keys()]) if (!marks.has(key)) seen.delete(key)
   return changed
 }

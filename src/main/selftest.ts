@@ -15,6 +15,13 @@ import { getUnsavedCount } from './unsaved'
  * to include the archive pipeline (see `pnpm fixture:archive`).
  * Never runs in a packaged app.
  */
+/*
+ * A note for anyone adding a check below: the renderer-side scripts are injected as
+ * template literals, so a backtick anywhere inside one — including inside a comment — ends
+ * the literal early. The build then fails with a parse error pointing at the comment rather
+ * than at the quoting, which is a confusing way to spend ten minutes. Write plain prose in
+ * these scripts and quote identifiers with single quotes.
+ */
 export function runSelfTest(win: BrowserWindow): void {
   if (app.isPackaged) return
 
@@ -818,6 +825,46 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     check((panel.rows ?? 0) > 0, `texture panel listed ${panel.rows} texture(s)`)
     check(panel.drawn === panel.rows, `every thumbnail decoded and drew (${panel.drawn}/${panel.rows})`)
   }
+
+  /*
+   * `layout.list` reports the sessions that are actually open.
+   *
+   * Worth its own check because it had no caller in the app and no coverage, and then
+   * quietly returned `[]` for every call: the effect spread the session map when the
+   * *service* was constructed rather than when it ran, and the service is built once,
+   * before anything is open. Nothing failed — the procedure succeeded with an empty array
+   * — and the one feature that depends on it, resyncing recovery keys after an archive
+   * save-as, silently applied nothing and left every key naming the old path.
+   */
+  const sessions = (await win.webContents.executeJavaScript(`(async () => {
+    const c = window.__bfclient
+    const store = window.__bfdev.documents.getState()
+    const listed = await c.layout.list()
+    const open = store.tabs.map(t => t.documentId)
+    /*
+     * Only the sessions behind live tabs are required to have a key. A session whose
+     * archive has since been closed legitimately has none — there is no path to name — and
+     * durableKey returns an empty string rather than failing, because an unresolvable key
+     * is not a reason for save or list to refuse to work.
+     */
+    const keyed = open.every(id => {
+      const entry = listed.find(candidate => candidate.documentId === id)
+      return entry && typeof entry.snapshotKey === 'string' && entry.snapshotKey.length > 0
+    })
+
+    return {
+      listed: listed.length,
+      open: open.length,
+      covers: open.every(id => listed.some(entry => entry.documentId === id)),
+      keyed
+    }
+  })()`)) as { listed?: number; open?: number; covers?: boolean; keyed?: boolean }
+
+  check(
+    (sessions.listed ?? 0) > 0 && sessions.covers === true,
+    `layout.list reports the open sessions (${sessions.listed} listed, ${sessions.open} tabs)`
+  )
+  check(sessions.keyed === true, 'every session behind a live tab carries a durable key')
 
   /*
    * Closing the last tab with the Materials panel open.

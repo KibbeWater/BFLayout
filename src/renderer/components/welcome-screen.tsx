@@ -107,7 +107,7 @@ function RecoveryCard(): ReactNode {
             continue
           }
 
-          openTab(
+          const displaced = openTab(
             {
               documentId: opened.documentId,
               snapshotKey: opened.snapshotKey,
@@ -120,6 +120,19 @@ function RecoveryCard(): ReactNode {
             // next layout opened would quietly throw the recovered work away.
             { newTab: true, unsaved: true }
           )
+          /*
+           * Released, because the store may well have displaced something: recovering a
+           * file that was already reopened this session — the ordinary Reopen-then-Recover
+           * path — replaces that clean tab, and its session holds a parsed document plus
+           * the preserved bytes of the whole file.
+           */
+          if (displaced) {
+            void client.layout
+              .close({ documentId: displaced })
+              .catch((detail: unknown) =>
+                console.warn('[bflayout] could not release a displaced document:', detail)
+              )
+          }
           recovered++
         }
 

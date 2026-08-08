@@ -54,7 +54,9 @@ export function useAutosave(): void {
       }
 
       for (const entry of plan.put) {
-        const tab = tabs.find((candidate) => candidate.snapshotKey === entry.key)
+        // By document id, not by key: two tabs can share a key, and matching on the key
+        // serialised whichever came first while the other tab's edits went unsnapshotted.
+        const tab = tabs.find((candidate) => candidate.documentId === entry.documentId)
         if (!tab) continue
         void client.snapshot
           .put({ key: entry.key, displayName: entry.displayName, document: tab.document })

@@ -124,7 +124,7 @@ export function useSessionRestore(onDone: () => void): SessionRestore {
           const opened = await client.layout.open({ source })
           // Every restored layout gets its own tab: the point of restoring is to
           // get the session back, not to end up with only its last file.
-          openTab(
+          const displaced = openTab(
             {
               documentId: opened.documentId,
               snapshotKey: opened.snapshotKey,
@@ -134,6 +134,15 @@ export function useSessionRestore(onDone: () => void): SessionRestore {
             },
             { newTab: true }
           )
+          // A saved session can name the same file twice, in which case the store
+          // activates the tab it already has and this session is redundant.
+          if (displaced) {
+            void client.layout
+              .close({ documentId: displaced })
+              .catch((detail: unknown) =>
+                console.warn('[bflayout] could not release a displaced document:', detail)
+              )
+          }
         } catch {
           failures.push(layout.entryKey ?? layout.filePath ?? 'a layout')
         }

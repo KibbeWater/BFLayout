@@ -66,8 +66,10 @@ interface DocumentStore {
    *
    * Replacing is the default because browsing a dump means opening one layout after
    * another to look at them, and a tab per glance buries the ones you care about.
-   * Returns the documentId it displaced, if any, so the caller can release it —
-   * the store does no IPC of its own.
+   * Returns a documentId the caller should release, if any, so its main-process session
+   * does not outlive its tab — the store does no IPC of its own. Usually that is the tab
+   * this one replaced; when an existing tab for the same file is activated instead, it is
+   * the *incoming* id, which never became a tab at all. Either way it is the one to close.
    */
   openTab: (
     tab: Omit<

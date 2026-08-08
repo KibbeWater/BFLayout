@@ -107,6 +107,7 @@ node node_modules/electron/install.js
 
 ```bash
 pnpm typecheck       # all four tsconfigs (see Architecture)
+pnpm lint            # react-hooks/rules-of-hooks, and little else on purpose
 pnpm test            # unit tests
 pnpm build           # production bundle
 pnpm package         # distributable via electron-builder
@@ -114,7 +115,18 @@ pnpm fixture:archive out.szs [yaz0|zstd|none]   # synthesize a test archive
 pnpm validate:romfs /path/to/romfs              # re-encode every file and compare
 pnpm validate:byml  /path/to/romfs              # parse every BYML document
 pnpm validate:astc  /path/to/vectors            # compare ASTC against astcenc
+pnpm diag:prt1 archive.szs Layout.bflyt         # which prt1 bytes the parser claims
+pnpm diag:pai1 /path/to/romfs                   # pai1 entries by target byte
+pnpm diag:bflan archive.szs Anim [section]      # one section, original beside rewritten
 ```
+
+`pnpm lint` carries one rule that matters. The same mistake shipped twice — a `useMemo`
+placed below an early return, so a panel rendered fewer hooks than the previous pass and
+React threw straight to the error boundary — and twice is the signature of a problem that
+needs a tool rather than more attention. `exhaustive-deps` is a warning rather than an
+error: several memos here deliberately key on a revision counter instead of the object they
+derive from, because the object is fresh every render and depending on it would never hit,
+and that is exactly the pattern the rule cannot tell from a bug.
 
 ## Architecture
 
@@ -342,6 +354,11 @@ differently:
   from its model instead, which is exact: every layout and animation in the dump
   re-encodes byte for byte from the model alone. Byte preservation is an optimisation for
   untouched sections, and a recovered document has none — the bytes it came from are gone.
+
+  A snapshot is decided per *file*, not per tab, because a file can have more than one tab
+  on it — edit a layout, then click it again in the archive browser. Deciding per tab
+  emitted a write and a discard for the same file in one pass, and whichever landed last
+  won, so the dirty tab's edits ended up with no snapshot at all every single flush.
 
   A snapshot is discarded when a file that *was* dirty goes clean again, which is what a
   save looks like from the renderer. Not merely when a clean tab for it exists: after a
