@@ -36,7 +36,7 @@ romfs dump (Switch, v1.0.4) is parsed and rewritten byte for byte:
 | --- | --- | --- |
 | SARC archives | 567 | 100% |
 | BFLYT layouts | 544 | 99.1% |
-| BFLAN animations | 2187 | 99.5% |
+| BFLAN animations | 2187 | 99.9% |
 | BNTX containers | 74,480 textures decoded | 100% |
 
 See [Validating against real files](#validating-against-real-files) for how to run
@@ -199,16 +199,32 @@ not, and each is now covered by a unit test:
   *items*, and a struct is one item however large it is.
 - **BFLAN group names are 36 bytes, not 28.** Verified on files with 2, 6 and 7
   groups; the reference implementation has this wrong.
+- **`pat1` can nest a whole `usd1` section inside itself.** Version 8 added a u32
+  after the groups offset that points at it. It was being skipped as padding and
+  written back as zero, so eight shipped animations lost the block and came back
+  52 to 76 bytes short.
+- **Unknown BFLAN sections kept only their signature and position**, not their
+  bytes, so any section this build does not model was dropped on save.
 - **`cnt1` sections were written last.** They sit near the *front* of the stream.
 - **Pane flag bits past the two modelled ones were cleared** on save.
 - **Padding bytes were zeroed** where shipped files put `0xff`.
 
-The remaining 0.9%: four layouts whose `prt1` part panes carry data reached
-through offsets, so the "keep the unmodelled tail" trick that fixed the other
-sections cannot be applied there without writing blocks twice — and one material
-difference not yet traced. All five still save correctly through the normal path,
-which replays original bytes for anything untouched; only a full re-encode from
-the model differs.
+What is left, and precisely why:
+
+- **Four layouts** whose `prt1` part panes carry data reached through offsets, so
+  the "keep the unmodelled tail" trick that fixed the other sections cannot be
+  applied without writing blocks twice. Plus one material difference not yet traced.
+- **Two animations** (`MiniGame_PictQuiz_00_Mosaic{Rough,Normal}`) whose `pai1`
+  entry declares `tagCount = 1` but carries **two** offset slots. The second points
+  at a 20-byte block — a u32 followed by the name `__CUS_Float_0` — that runs to the
+  end of the section, i.e. an animation targeting a user-data custom float. Two
+  samples is not enough to infer the general rule, and guessing it risks the 2185
+  animations that currently round-trip, so this is left modelled-as-unknown rather
+  than approximated. `pnpm diag:bflan` is the tool for picking this up again.
+
+All of these still **save** correctly through the normal path, which replays
+original bytes for anything untouched; only a full re-encode from the model
+differs, which is what `validate:romfs` deliberately forces.
 
 **ASTC decodes**, which in this game is most textures: 74,480 surfaces decode
 with zero errors, up from 24,423 before the decoder existed. The only formats

@@ -89,6 +89,19 @@ export interface AnimationTagInfo {
    * and is not modelled. Round-tripped verbatim.
    */
   trailing: number[]
+  /**
+   * A `usd1` user-data block nested inside the pat1 section, kept verbatim.
+   *
+   * Version 8 added a u32 after the groups offset which points at it; this build
+   * treated that field as padding and wrote zero, dropping the block. Eight shipped
+   * animations came back 52 to 76 bytes short as a result — exactly the size of
+   * their nested usd1.
+   *
+   * `number[]` rather than `Uint8Array` because the animation document crosses the
+   * RPC boundary and oRPC's serialiser has no case for typed arrays; it would
+   * expand one into an object of numeric keys.
+   */
+  userData: number[]
 }
 
 export interface AnimationDocument {
@@ -97,7 +110,18 @@ export interface AnimationDocument {
   tag: AnimationTagInfo | null
   info: AnimationInfo | null
   /** Sections this build does not model, kept so a save cannot lose them. */
-  unknownSections: { signature: string; index: number }[]
+  /**
+   * Sections this build does not model, kept verbatim.
+   *
+   * `data` is the section body, i.e. everything after the eight-byte signature and
+   * size header, so re-emitting it through the same section writer reproduces the
+   * original bytes exactly. Recording only the signature and position — which is
+   * what this used to do — silently dropped the section on save.
+   *
+   * `number[]` rather than `Uint8Array`: this document crosses the RPC boundary and
+   * oRPC's serialiser has no case for typed arrays.
+   */
+  unknownSections: { signature: string; index: number; data: number[] }[]
 }
 
 export interface ParsedAnimation {

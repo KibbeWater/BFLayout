@@ -6,7 +6,12 @@
  * romfs dump is parsed, rewritten, and compared byte for byte against what
  * shipped. A mismatch means we are wrong, not the file.
  *
- *   pnpm validate:romfs <romfs-dir> [--limit N] [--verbose]
+ *   pnpm validate:romfs <romfs-dir> [--limit N] [--verbose] [--only kinds]
+ *
+ * `--only` takes a comma-separated list of `archives`, `layouts`, `animations` and
+ * `textures`. Decoding every texture in a dump takes tens of minutes, so narrowing
+ * to what you are actually working on turns the feedback loop from a coffee break
+ * into a few seconds.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
@@ -72,6 +77,22 @@ async function main(): Promise<void> {
   const limit = limitFlag > 0 ? Number(process.argv[limitFlag + 1]) : Infinity
   const verbose = process.argv.includes('--verbose')
 
+  const onlyFlag = process.argv.indexOf('--only')
+  const only =
+    onlyFlag > 0
+      ? new Set((process.argv[onlyFlag + 1] ?? '').split(',').map((part) => part.trim()))
+      : null
+  enabled = only
+
+  const known = ['archives', 'layouts', 'animations', 'textures']
+  if (only) {
+    const unknown = [...only].filter((kind) => !known.includes(kind))
+    if (unknown.length > 0) {
+      console.error(`unknown --only kind(s): ${unknown.join(', ')}; expected ${known.join(', ')}`)
+      process.exit(2)
+    }
+  }
+
   const zstd = await import('@bokuweb/zstd-wasm')
   await zstd.init()
 
@@ -123,6 +144,8 @@ async function main(): Promise<void> {
 }
 
 function checkArchive(path: string, data: Uint8Array, verbose: boolean): void {
+  // Archives are still walked when excluded, because the layouts and animations
+  // worth checking live inside them; only the byte-comparison is skipped.
   let parsed
   try {
     parsed = parseSarc(data)
@@ -132,20 +155,22 @@ function checkArchive(path: string, data: Uint8Array, verbose: boolean): void {
     return
   }
 
-  try {
-    const rewritten = writeSarc(parsed)
-    const at = sameBytes(data, rewritten)
-    if (at === -2) archives.ok++
-    else {
-      archives.mismatch++
-      note(
-        archives,
-        `${basename(path)}: rewrite differs (${at === -1 ? `length ${data.length} vs ${rewritten.length}` : `first at 0x${at.toString(16)}`})`
-      )
+  if (wanted('archives')) {
+    try {
+      const rewritten = writeSarc(parsed)
+      const at = sameBytes(data, rewritten)
+      if (at === -2) archives.ok++
+      else {
+        archives.mismatch++
+        note(
+          archives,
+          `${basename(path)}: rewrite differs (${at === -1 ? `length ${data.length} vs ${rewritten.length}` : `first at 0x${at.toString(16)}`})`
+        )
+      }
+    } catch (cause) {
+      archives.failed++
+      note(archives, `${basename(path)}: rewrite threw: ${describe(cause)}`)
     }
-  } catch (cause) {
-    archives.failed++
-    note(archives, `${basename(path)}: rewrite threw: ${describe(cause)}`)
   }
 
   for (const entry of parsed.entries) {
@@ -157,6 +182,7 @@ function checkArchive(path: string, data: Uint8Array, verbose: boolean): void {
 }
 
 function checkLayout(name: string, data: Uint8Array, verbose: boolean): void {
+  if (!wanted('layouts')) return
   let parsed
   try {
     parsed = parseBflyt(data)
@@ -192,6 +218,7 @@ function checkLayout(name: string, data: Uint8Array, verbose: boolean): void {
 }
 
 function checkAnimation(name: string, data: Uint8Array, verbose: boolean): void {
+  if (!wanted('animations')) return
   let parsed
   try {
     parsed = parseBflan(data)
@@ -207,9 +234,13 @@ function checkAnimation(name: string, data: Uint8Array, verbose: boolean): void 
     if (at === -2) animations.ok++
     else {
       animations.mismatch++
+      // Per-section sizes, because "56 bytes short" says nothing about where. Both
+      // streams carry a section table, so the sizes can be compared directly and
+      // the culprit named.
       note(
         animations,
-        `${name}: ${at === -1 ? `length ${data.length} vs ${rewritten.length}` : `differs at 0x${at.toString(16)}`}`
+        `${name}: ${at === -1 ? `length ${data.length} vs ${rewritten.length}` : `differs at 0x${at.toString(16)}`}` +
+          ` | original ${sectionSizes(data)} vs rewritten ${sectionSizes(rewritten)}`
       )
     }
   } catch (cause) {
@@ -221,6 +252,7 @@ function checkAnimation(name: string, data: Uint8Array, verbose: boolean): void 
 }
 
 function checkTexture(name: string, data: Uint8Array, verbose: boolean): void {
+  if (!wanted('textures')) return
   let container
   try {
     container = parseBntx(data)
@@ -253,6 +285,43 @@ function checkTexture(name: string, data: Uint8Array, verbose: boolean): void {
   }
 
   if (verbose) console.log(`  bntx ${name}: ${container.textures.length} textures`)
+}
+
+/**
+ * Which checks are enabled, set from `--only`. A module-level value rather than a
+ * parameter threaded through five call sites, which would be all noise.
+ */
+let enabled: ReadonlySet<string> | null = null
+function wanted(kind: string): boolean {
+  return enabled === null || enabled.has(kind)
+}
+
+/**
+ * The section signatures and sizes of a BFLYT/BFLAN stream, as `sig:size` pairs.
+ *
+ * Both formats share the same shell: magic[4], a byte-order mark, the header size,
+ * the version, the file size, then the section count — so sections begin at the
+ * header size and each is a `sig`+`size` block.
+ */
+function sectionSizes(data: Uint8Array): string {
+  try {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+    // 0xfffe at offset 4 marks little-endian, which every Switch file is.
+    const little = view.getUint16(4, false) === 0xfffe
+    let at = view.getUint16(6, little)
+    const count = view.getUint16(16, little)
+    const parts: string[] = []
+    for (let i = 0; i < count && at + 8 <= data.length; i++) {
+      const signature = String.fromCharCode(data[at]!, data[at + 1]!, data[at + 2]!, data[at + 3]!)
+      const size = view.getUint32(at + 4, little)
+      parts.push(`${signature}:${size}`)
+      if (size < 8) break
+      at += size
+    }
+    return `[${parts.join(' ')}]`
+  } catch {
+    return '[unreadable]'
+  }
 }
 
 function describe(cause: unknown): string {

@@ -23,7 +23,8 @@
     "postinstall": "electron-builder install-app-deps",
     "validate:romfs": "tsx --tsconfig tsconfig.node.json scripts/validate-romfs.ts",
     "validate:astc": "tsx --tsconfig tsconfig.node.json scripts/validate-astc.ts",
-    "validate:byml": "tsx --tsconfig tsconfig.node.json scripts/validate-byml.ts"
+    "validate:byml": "tsx --tsconfig tsconfig.node.json scripts/validate-byml.ts",
+    "diag:bflan": "tsx --tsconfig tsconfig.node.json scripts/diag-bflan.ts"
   },
   "dependencies": {
     "@bokuweb/zstd-wasm": "0.0.27",

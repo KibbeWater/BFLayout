@@ -136,13 +136,17 @@ export function parseBflan(data: Uint8Array): ParsedAnimation {
 
     switch (signature) {
       case 'pat1':
-        document.tag = readTagInfo(reader, start, version.major)
+        document.tag = readTagInfo(reader, start, start + size, version.major)
         break
       case 'pai1':
         document.info = readInfo(reader, start)
         break
       default:
-        document.unknownSections.push({ signature, index })
+        document.unknownSections.push({
+          signature,
+          index,
+          data: [...reader.bytesAt(start + 8, size - 8)]
+        })
         break
     }
 
@@ -152,13 +156,23 @@ export function parseBflan(data: Uint8Array): ParsedAnimation {
   return { document, original: data.slice(0) }
 }
 
-function readTagInfo(reader: BinaryReader, start: number, major: number): AnimationTagInfo {
+function readTagInfo(
+  reader: BinaryReader,
+  start: number,
+  end: number,
+  major: number
+): AnimationTagInfo {
   const groupNameSize = groupNameLength(major)
   const order = reader.u16()
   const groupCount = reader.u16()
   const nameOffset = reader.u32()
   const groupsOffset = reader.u32()
-  if (major >= 8) reader.skip(4)
+  /*
+   * Version 8 added an offset to a `usd1` block nested inside this section, after
+   * the group names. It was read as padding and written back as zero, which
+   * silently dropped the block.
+   */
+  const userDataOffset = major >= 8 ? reader.u32() : 0
 
   const startFrame = reader.i16()
   const endFrame = reader.i16()
@@ -175,7 +189,14 @@ function readTagInfo(reader: BinaryReader, start: number, major: number): Animat
   reader.seek(start + groupsOffset)
   for (let i = 0; i < groupCount; i++) groups.push(reader.fixedString(groupNameSize))
 
-  return { name, order, startFrame, endFrame, childBinding, groups, trailing }
+  // Everything from the offset to the end of the section, which is the whole nested
+  // section including its own signature and size.
+  const userData =
+    userDataOffset > 0 && start + userDataOffset < end
+      ? [...reader.bytesAt(start + userDataOffset, end - (start + userDataOffset))]
+      : []
+
+  return { name, order, startFrame, endFrame, childBinding, groups, trailing, userData }
 }
 
 function readInfo(reader: BinaryReader, start: number): AnimationInfo {
@@ -301,14 +322,41 @@ export function writeBflan(document: AnimationDocument, original?: Uint8Array): 
   const sectionCount = writer.defer('u16')
   writer.u16(0)
 
+  /**
+   * Sections are emitted in their original stream order.
+   *
+   * Unknown sections record the index they were found at, so they are written when
+   * the counter reaches it rather than appended — a section's position in the
+   * stream is part of the format, and `cnt1` in a layout taught us that the hard
+   * way by sitting near the front rather than the end.
+   */
+  const pending = [...document.unknownSections].sort((a, b) => a.index - b.index)
   let sections = 0
 
+  const emitPendingUnknown = (): void => {
+    while (pending.length > 0 && pending[0]!.index === sections) {
+      const unknown = pending.shift()!
+      writer.section(unknown.signature, () => writer.bytes(new Uint8Array(unknown.data)))
+      sections++
+    }
+  }
+
+  emitPendingUnknown()
   if (document.tag) {
     writer.section('pat1', () => writeTagInfo(writer, document.tag!, document.version.major))
     sections++
+    emitPendingUnknown()
   }
   if (document.info) {
     writer.section('pai1', () => writeInfo(writer, document.info!))
+    sections++
+    emitPendingUnknown()
+  }
+
+  // Anything whose recorded index sits past the sections we model.
+  while (pending.length > 0) {
+    const unknown = pending.shift()!
+    writer.section(unknown.signature, () => writer.bytes(new Uint8Array(unknown.data)))
     sections++
   }
 
@@ -332,7 +380,7 @@ function writeTagInfo(writer: BinaryWriter, tag: AnimationTagInfo, major: number
   writer.u16(tag.groups.length)
   const nameOffset = writer.defer('u32')
   const groupsOffset = writer.defer('u32')
-  if (major >= 8) writer.u32(0)
+  const userDataOffset = major >= 8 ? writer.defer('u32') : null
 
   writer.i16(tag.startFrame)
   writer.i16(tag.endFrame)
@@ -345,6 +393,16 @@ function writeTagInfo(writer: BinaryWriter, tag: AnimationTagInfo, major: number
 
   groupsOffset.set(writer.length - base)
   for (const group of tag.groups) writer.fixedString(group, groupNameLength(major))
+
+  // A nested usd1 block, replayed verbatim after the groups.
+  if (userDataOffset) {
+    if (tag.userData.length > 0) {
+      userDataOffset.set(writer.length - base)
+      writer.bytes(new Uint8Array(tag.userData))
+    } else {
+      userDataOffset.set(0)
+    }
+  }
 }
 
 function writeInfo(writer: BinaryWriter, info: AnimationInfo): void {
@@ -465,7 +523,8 @@ export function createAnimation(name: string, frameSize = 60): AnimationDocument
       endFrame: frameSize,
       childBinding: false,
       groups: [],
-      trailing: []
+      trailing: [],
+      userData: []
     },
     info: { frameSize, loop: false, textures: [], entries: [] },
     unknownSections: []
