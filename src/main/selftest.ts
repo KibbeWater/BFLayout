@@ -1056,6 +1056,58 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * Undoing back to the opened state reports the document clean again. Both undo and
+   * redo used to set unsaved unconditionally, so a file could never return to a saved
+   * state without saving — and the close-confirmation guard would then fire on a
+   * document identical to what is on disk.
+   */
+  const savePoint = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    store.markSaved(tab.documentId)
+    await new Promise(r => setTimeout(r, 200))
+    const clean = dev.documents.getState().tabs.find(t => t.documentId === store.activeId).unsaved
+
+    // One real, undoable edit.
+    const target = tab.document.rootPane.children[0]
+    store.select([target.id])
+    await new Promise(r => setTimeout(r, 150))
+    window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'ArrowRight', bubbles: true, cancelable: true
+    }))
+    await new Promise(r => setTimeout(r, 250))
+    const afterEdit = dev.documents.getState().tabs.find(t => t.documentId === store.activeId).unsaved
+
+    dev.documents.getState().undo()
+    await new Promise(r => setTimeout(r, 250))
+    const afterUndo = dev.documents.getState().tabs.find(t => t.documentId === store.activeId).unsaved
+
+    dev.documents.getState().redo()
+    await new Promise(r => setTimeout(r, 250))
+    const afterRedo = dev.documents.getState().tabs.find(t => t.documentId === store.activeId).unsaved
+
+    return { clean, afterEdit, afterUndo, afterRedo }
+  })()`)) as {
+    error?: string
+    clean?: boolean
+    afterEdit?: boolean
+    afterUndo?: boolean
+    afterRedo?: boolean
+  }
+
+  if (savePoint.error) {
+    check(false, `save point: ${savePoint.error}`)
+  } else {
+    check(savePoint.clean === false, 'a saved document reports clean')
+    check(savePoint.afterEdit === true, 'an edit marks it unsaved')
+    check(savePoint.afterUndo === false, 'undoing back to the save point reports it clean again')
+    check(savePoint.afterRedo === true, 'redoing past the save point marks it unsaved')
+  }
+
+  /*
    * Renaming is one undo entry, not one per keystroke. Committing per character meant
    * a twenty-character rename cost twenty presses of Cmd+Z and evicted twenty real
    * entries from the 200-deep stack.

@@ -31,6 +31,18 @@ export interface DocumentTab {
   collapsedIds: Set<string>
   /** True once anything has been edited since the last save. */
   unsaved: boolean
+  /**
+   * Undo-stack depth as of the last save, or -1 when the save point is unreachable.
+   *
+   * Lets `unsaved` be exact: undoing back to how the file was opened reports it clean
+   * again, where before undo and redo both set `unsaved = true` unconditionally and a
+   * document could never return to a saved state without saving.
+   *
+   * -1 once an edit happens that undo cannot reverse, or once the bounded stack drops
+   * the entry the save point referred to — after either, the depth no longer
+   * identifies that state.
+   */
+  savedDepth: number
   /** Bumped on every mutation so the canvas knows to redraw. */
   revision: number
   history: UndoStack
@@ -50,7 +62,7 @@ interface DocumentStore {
   openTab: (
     tab: Omit<
       DocumentTab,
-      'selectedPaneIds' | 'collapsedIds' | 'unsaved' | 'revision' | 'history'
+      'selectedPaneIds' | 'collapsedIds' | 'unsaved' | 'savedDepth' | 'revision' | 'history'
     >,
     options?: { newTab?: boolean }
   ) => string | null
@@ -95,6 +107,7 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
       selectedPaneIds: [],
       collapsedIds: new Set<string>(),
       unsaved: false,
+      savedDepth: 0,
       revision: 0,
       history: EMPTY_UNDO
     }
@@ -180,7 +193,9 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
         // The document tree is mutated in place; `revision` is what React and
         // the GL renderer actually subscribe to.
         recipe(tab)
-        return { ...tab, unsaved: true, revision: tab.revision + 1 }
+        // A mutation outside the command system cannot be undone, so the save point
+        // is no longer reachable.
+        return { ...tab, unsaved: true, savedDepth: -1, revision: tab.revision + 1 }
       })
     }))
   },
@@ -190,10 +205,16 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
       tabs: state.tabs.map((tab) => {
         if (tab.documentId !== state.activeId) return tab
         command.apply(tab.document)
+        const history = pushCommand(tab.history, command)
+        // The stack is bounded, so a push can drop the oldest entry instead of growing.
+        // Once that happens the recorded depth no longer names the saved state.
+        const trimmed = history.undo.length === tab.history.undo.length
+        const savedDepth = trimmed ? -1 : tab.savedDepth
         return {
           ...tab,
-          history: pushCommand(tab.history, command),
-          unsaved: true,
+          history,
+          savedDepth,
+          unsaved: history.undo.length !== savedDepth,
           revision: tab.revision + 1
         }
       })
@@ -206,13 +227,15 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
         const command = tab.history.undo[tab.history.undo.length - 1]
         if (!command) return tab
         command.invert(tab.document)
+        const history = {
+          undo: tab.history.undo.slice(0, -1),
+          redo: [...tab.history.redo, command]
+        }
         return {
           ...tab,
-          history: {
-            undo: tab.history.undo.slice(0, -1),
-            redo: [...tab.history.redo, command]
-          },
-          unsaved: true,
+          history,
+          // Undoing back to the save point means the file matches what is on disk.
+          unsaved: history.undo.length !== tab.savedDepth,
           revision: tab.revision + 1
         }
       })
@@ -225,13 +248,14 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
         const command = tab.history.redo[tab.history.redo.length - 1]
         if (!command) return tab
         command.apply(tab.document)
+        const history = {
+          undo: [...tab.history.undo, command],
+          redo: tab.history.redo.slice(0, -1)
+        }
         return {
           ...tab,
-          history: {
-            undo: [...tab.history.undo, command],
-            redo: tab.history.redo.slice(0, -1)
-          },
-          unsaved: true,
+          history,
+          unsaved: history.undo.length !== tab.savedDepth,
           revision: tab.revision + 1
         }
       })
@@ -240,7 +264,9 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
   markSaved: (documentId?: string) =>
     set((state) => ({
       tabs: state.tabs.map((tab) =>
-        tab.documentId === (documentId ?? state.activeId) ? { ...tab, unsaved: false } : tab
+        tab.documentId === (documentId ?? state.activeId)
+          ? { ...tab, unsaved: false, savedDepth: tab.history.undo.length }
+          : tab
       )
     })),
 
