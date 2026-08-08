@@ -155,6 +155,8 @@ export class LayoutRenderer {
 
   /** Most recent flattened tree, reused for hit-testing without re-walking. */
   private lastFlattened: PaneTransform[] = []
+  /** Text rasters used by the frame currently being built; see buildPanes. */
+  private readonly frameTextIds = new Set<string>()
 
   constructor(canvas: HTMLCanvasElement, onTexturesChanged: () => void) {
     const gl = canvas.getContext('webgl2', {
@@ -356,6 +358,8 @@ export class LayoutRenderer {
     // Panes first, so every textured batch is emitted before the flat overlay
     // geometry that has to sit on top of it.
     this.buildPanes(document, options)
+    // Now that parts have been walked too, anything untouched is genuinely gone.
+    this.text.retain(this.frameTextIds)
 
     this.lineFirst = this.vertexCount
     if (options.showGrid && options.gridSize > 0) {
@@ -406,8 +410,15 @@ export class LayoutRenderer {
       overrides ? (pane) => overrides.panes.get(pane.name) : undefined
     )
     this.lastFlattened = flattened
-    // Free rasters for panes that have since been deleted.
-    this.text.retain(new Set(flattened.map((entry) => entry.pane.id)))
+    /*
+     * Collected as the frame is built, and released at the end.
+     *
+     * Retaining only the outer document's pane ids up front deleted every raster
+     * belonging to a prt1 part, because parts are walked later in `buildPart`. They
+     * were then rebuilt immediately — a canvas resize, measureText, fillText and
+     * texImage2D per part text pane, per frame, at 60Hz during a drag.
+     */
+    this.frameTextIds.clear()
 
     for (const entry of flattened) {
       if (!entry.visible && !options.showInvisiblePanes) continue
@@ -443,6 +454,7 @@ export class LayoutRenderer {
       } else if (entry.pane.kind === 'prt1') {
         this.buildPart(entry, entry.pane as PartPane, alpha, options)
       } else if (entry.pane.kind === 'txt1') {
+        if (options.showTextures) this.frameTextIds.add(entry.pane.id)
         const raster = options.showTextures ? this.text.lookup(entry.pane as TextPane) : null
         if (raster) {
           // The gradient and shadow are baked into the raster, so the vertex
@@ -583,6 +595,7 @@ export class LayoutRenderer {
       } else if (inner.pane.kind === 'wnd1') {
         this.buildWindow(document, combined, inner.pane as WindowPane, innerAlpha, options, null)
       } else if (inner.pane.kind === 'txt1') {
+        if (options.showTextures) this.frameTextIds.add(inner.pane.id)
         const raster = options.showTextures ? this.text.lookup(inner.pane as TextPane) : null
         const tint = [1, 1, 1, innerAlpha]
         if (raster) {
