@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, Ban, Loader2 } from 'lucide-react'
+import { AlertTriangle, Ban, Download, Loader2 } from 'lucide-react'
 
 import type { LayoutSource, TextureInfo } from '@shared/contract'
 import { getClient, getOrpc } from '@renderer/lib/orpc'
 import { describeError } from '@renderer/lib/errors'
+import { reportError, reportSuccess } from '@renderer/lib/toast'
 import { useActiveTab } from '@renderer/editor/store/document'
 
 /**
@@ -102,8 +103,45 @@ function TextureRow({
   texture: TextureInfo
   source: LayoutSource
 }): ReactNode {
+  const [exporting, setExporting] = useState(false)
+
+  /**
+   * Writes the decoded texture out as a PNG.
+   *
+   * The only way to get a texture *out* of an archive: the files ship BNTX with Tegra
+   * swizzling and BCn or ASTC compression, which no image editor opens. Offered only
+   * where a decoder exists, because there is nothing to write otherwise.
+   */
+  const exportPng = (): void => {
+    setExporting(true)
+    void (async () => {
+      const client = getClient()
+      try {
+        const chosen = await client.dialog.saveFileAs({
+          purpose: 'image',
+          defaultName: `${texture.name.replace(/\.bntx$/i, '')}.png`
+        })
+        if (chosen.canceled || !chosen.path) return
+
+        const written = await client.textures.exportPng({
+          source,
+          name: texture.name,
+          path: chosen.path
+        })
+        reportSuccess(
+          'Exported',
+          `${texture.name} written as ${written.width}×${written.height} PNG (${written.bytes} bytes).`
+        )
+      } catch (cause) {
+        reportError(cause, { retry: exportPng })
+      } finally {
+        setExporting(false)
+      }
+    })()
+  }
+
   return (
-    <li className="flex items-start gap-2 rounded p-1.5 hover:bg-accent/40">
+    <li className="group flex items-start gap-2 rounded p-1.5 hover:bg-accent/40">
       <Thumbnail texture={texture} source={source} />
       <div className="min-w-0 flex-1">
         <p className="truncate text-xs" title={texture.name}>
@@ -123,6 +161,23 @@ function TextureRow({
           {texture.decodable ? '' : ' · no decoder'}
         </p>
       </div>
+
+      {texture.decodable ? (
+        <button
+          type="button"
+          onClick={exportPng}
+          disabled={exporting}
+          title={`Export ${texture.name} as a PNG`}
+          aria-label={`Export ${texture.name} as a PNG`}
+          className="shrink-0 rounded p-1 opacity-0 hover:bg-accent focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-40"
+        >
+          {exporting ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <Download className="size-3.5 text-muted-foreground" />
+          )}
+        </button>
+      ) : null}
     </li>
   )
 }

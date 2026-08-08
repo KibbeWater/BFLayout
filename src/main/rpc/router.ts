@@ -184,6 +184,14 @@ const textureRoutes = {
 
   get: os.textures.get.handler(({ input }) =>
     run(Effect.flatMap(TextureService, (s) => s.get(input.source, input.name, input.mip)))
+  ),
+
+  exportPng: os.textures.exportPng.handler(({ input }) =>
+    run(
+      Effect.flatMap(TextureService, (s) =>
+        s.exportPng(input.source, input.name, input.path, input.mip)
+      )
+    )
   )
 }
 

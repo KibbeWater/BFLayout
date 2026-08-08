@@ -1,4 +1,4 @@
-import { writeFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { app, type BrowserWindow } from 'electron'
 
 import { getUnsavedCount } from './unsaved'
@@ -1053,6 +1053,53 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     // One entry for the whole drag, not one per frame.
     check(dragResult.undoDepth === 1, `the drag recorded one undo entry (${dragResult.undoDepth})`)
     check(dragResult.unsaved === true, 'the drag marked the document unsaved')
+  }
+
+  /*
+   * Texture export writes a real PNG. Textures are otherwise read-only, and the
+   * archives ship BNTX with Tegra swizzling and BCn or ASTC compression that no image
+   * editor opens, so this is the only way one gets out.
+   */
+  const pngPath = `${app.getPath('temp')}/bflayout-selftest-export.png`
+  const exported = (await win.webContents.executeJavaScript(`(async () => {
+    const c = window.__bfclient
+    const store = window.__bfdev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    const list = await c.textures.list({ source: tab.source })
+    const usable = list.textures.find(t => t.decodable)
+    if (!usable) return { error: 'no decodable texture to export' }
+
+    const written = await c.textures.exportPng({
+      source: tab.source,
+      name: usable.name,
+      path: ${JSON.stringify(pngPath)}
+    })
+    return { written, name: usable.name }
+  })()`)) as {
+    error?: string
+    name?: string
+    written?: { path: string; width: number; height: number; bytes: number }
+  }
+
+  if (exported.error) {
+    check(false, `texture export: ${exported.error}`)
+  } else {
+    const written = exported.written
+    check((written?.bytes ?? 0) > 0, `exported ${exported.name} as ${written?.bytes} bytes of PNG`)
+    // The magic matters: nativeImage returning an empty or non-PNG buffer would still
+    // have produced a file.
+    const bytes = await readFile(pngPath).catch(() => null)
+    const signature = bytes ? [...bytes.subarray(0, 8)] : []
+    check(
+      signature.join(',') === '137,80,78,71,13,10,26,10',
+      `the file on disk starts with the PNG signature (${signature.slice(0, 4).join(',')})`
+    )
+    check(
+      (bytes?.length ?? 0) === (written?.bytes ?? -1),
+      `the reported size matches the file (${bytes?.length} vs ${written?.bytes})`
+    )
   }
 
   /*

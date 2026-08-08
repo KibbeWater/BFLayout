@@ -30,7 +30,8 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | Materials list | Working (usage counts, shared-material warnings) |
 | Show / hide panels, native menu bar | Working |
 | prt1 external part resolution | Working (parts draw their referenced layout) |
-| Texture add / replace / export | Not started (textures are read-only) |
+| Texture export to PNG | Working |
+| Texture add / replace | Not started (textures are otherwise read-only) |
 | BFFNT font rendering | Out of scope for v1 (see Text panes) |
 
 **Validated against real game files.** Every layout archive in a Tomodachi Life
@@ -285,6 +286,12 @@ open archive — because layouts routinely reference a shared texture archive
 opened separately. A loose `.bflyt` searches the directory beside it. Names are
 matched case-insensitively with `.bntx` optional, since layouts and containers
 disagree about both.
+
+Any decodable texture can be **exported as a PNG** from the Textures panel, which is
+the only way to get one out: the files ship BNTX with Tegra swizzling and BCn or ASTC
+compression that no image editor opens. Encoding goes through Electron's `nativeImage`
+rather than a PNG library, since it is already present and this is the only place a
+real image format is needed.
 
 `BC1`–`BC5`, ASTC and the uncompressed formats decode. **`BC6H` and `BC7` do
 not** — they are recognised and reported, and the pane draws a magenta checker

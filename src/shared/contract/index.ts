@@ -203,7 +203,31 @@ export const texturesContract = {
         mip: z.number().int().min(0).optional()
       })
     )
-    .output(decodedTextureSchema)
+    .output(decodedTextureSchema),
+  /**
+   * Writes a decoded texture to a PNG.
+   *
+   * Textures are otherwise read-only, and this is the way one gets *out*: the archives
+   * ship BNTX with Tegra swizzling and BCn or ASTC compression, which no image editor
+   * opens.
+   */
+  exportPng: base
+    .input(
+      z.object({
+        source: layoutSourceSchema,
+        name: z.string().min(1),
+        path: z.string().min(1),
+        mip: z.number().int().min(0).optional()
+      })
+    )
+    .output(
+      z.object({
+        path: z.string(),
+        width: z.number().int(),
+        height: z.number().int(),
+        bytes: z.number().int()
+      })
+    )
 }
 
 /**

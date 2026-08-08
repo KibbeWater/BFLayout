@@ -1,4 +1,6 @@
+import { writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
+import { nativeImage } from 'electron'
 import { Effect } from 'effect'
 
 import { FormatParseError, UnsupportedFormatError } from '@shared/binary/errors'
@@ -335,6 +337,88 @@ export class TextureService extends Effect.Service<TextureService>()('TextureSer
         return result
       })
 
-    return { list, get } as const
+    /** Reads a Blob's bytes; the cache stores them that way for the RPC boundary. */
+    const blobBytes = (blob: DecodedTexture['rgba']): Effect.Effect<ArrayBuffer, IoError> =>
+      Effect.tryPromise({
+        try: () => blob.arrayBuffer(),
+        catch: (cause) =>
+          new IoError({
+            detail: `could not read decoded pixels: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }`
+          })
+      })
+
+    /**
+     * Writes a decoded texture to a PNG on disk.
+     *
+     * Textures are otherwise read-only, and getting one *out* of a game archive is
+     * the first thing anyone wants: the archives ship BNTX with Tegra swizzling and
+     * BCn or ASTC compression, which no image editor opens.
+     *
+     * Encoded with Electron's `nativeImage` rather than a PNG library, because it is
+     * already here and this is the only place a real image format is needed. It wants
+     * BGRA, so the channels are swapped on the way in.
+     */
+    const exportPng = (
+      source: LayoutSource,
+      name: string,
+      path: string,
+      mip = 0
+    ): Effect.Effect<
+      { path: string; width: number; height: number; bytes: number },
+      IoError | NotFoundError | UnsupportedFormatError | FormatParseError
+    > =>
+      Effect.gen(function* () {
+        const decodedTexture = yield* get(source, name, mip)
+        const rgba = new Uint8Array(yield* blobBytes(decodedTexture.rgba))
+
+        const bgra = new Uint8Array(rgba.length)
+        for (let i = 0; i < rgba.length; i += 4) {
+          bgra[i] = rgba[i + 2]!
+          bgra[i + 1] = rgba[i + 1]!
+          bgra[i + 2] = rgba[i]!
+          bgra[i + 3] = rgba[i + 3]!
+        }
+
+        const png = yield* Effect.try({
+          try: () => {
+            const image = nativeImage.createFromBitmap(Buffer.from(bgra), {
+              width: decodedTexture.width,
+              height: decodedTexture.height
+            })
+            const encoded = image.toPNG()
+            if (encoded.length === 0) throw new Error('the PNG encoder produced no bytes')
+            return encoded
+          },
+          catch: (cause) =>
+            new IoError({
+              path,
+              detail: `could not encode ${name} as PNG: ${
+                cause instanceof Error ? cause.message : String(cause)
+              }`
+            })
+        })
+
+        yield* Effect.tryPromise({
+          try: () => writeFile(path, png),
+          catch: (cause) =>
+            new IoError({
+              path,
+              detail: `could not write ${path}: ${
+                cause instanceof Error ? cause.message : String(cause)
+              }`
+            })
+        })
+
+        return {
+          path,
+          width: decodedTexture.width,
+          height: decodedTexture.height,
+          bytes: png.length
+        }
+      })
+
+    return { list, get, exportPng } as const
   })
 }) {}

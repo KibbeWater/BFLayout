@@ -7,7 +7,7 @@ const LAYOUT_EXTENSIONS = ['bflyt', 'bclyt', 'brlyt']
 const ANIM_EXTENSIONS = ['bflan', 'bclan', 'brlan']
 const ARCHIVE_EXTENSIONS = ['szs', 'sarc', 'arc', 'lyarc', 'pack', 'zs']
 
-export type OpenPurpose = 'layout' | 'archive' | 'any'
+export type OpenPurpose = 'layout' | 'archive' | 'image' | 'any'
 
 function filtersFor(purpose: OpenPurpose): Electron.FileFilter[] {
   const layout = { name: 'Layouts', extensions: LAYOUT_EXTENSIONS }
@@ -19,6 +19,9 @@ function filtersFor(purpose: OpenPurpose): Electron.FileFilter[] {
       return [layout, all]
     case 'archive':
       return [archive, all]
+    case 'image':
+      // Only PNG: it is the one format the exporter writes.
+      return [{ name: 'PNG image', extensions: ['png'] }, all]
     default:
       return [
         {

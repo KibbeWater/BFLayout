@@ -119,7 +119,7 @@ export const archiveDescriptorSchema = z.object({
 
 export type ArchiveDescriptor = z.infer<typeof archiveDescriptorSchema>
 
-export const openPurposeSchema = z.enum(['layout', 'archive', 'any'])
+export const openPurposeSchema = z.enum(['layout', 'archive', 'image', 'any'])
 
 /** Where a layout came from: a loose file, or an entry inside an open archive. */
 export const layoutSourceSchema = z.union([
