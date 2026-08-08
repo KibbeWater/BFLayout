@@ -1,0 +1,237 @@
+import { oc } from '@orpc/contract'
+import * as z from 'zod'
+
+import {
+  appSettingsSchema,
+  animationCandidateSchema,
+  archiveDescriptorSchema,
+  compressionKindSchema,
+  decodedTextureSchema,
+  openAnimationResultSchema,
+  layoutDocumentSchema,
+  layoutSourceSchema,
+  layoutSummarySchema,
+  okSchema,
+  openLayoutResultSchema,
+  openPurposeSchema,
+  recentEntrySchema,
+  recentKindSchema,
+  folderListingSchema,
+  textureListSchema,
+  windowStateSchema,
+  workspaceSnapshotSchema
+} from './schemas'
+
+export * from './schemas'
+
+/**
+ * Every procedure shares this error vocabulary. Main maps its Effect tagged
+ * errors onto these codes exhaustively (src/main/rpc/errors.ts), and the
+ * renderer discriminates them with oRPC's isDefinedError.
+ */
+const base = oc.errors({
+  FILE_NOT_FOUND: {
+    message: 'File not found',
+    data: z.object({ path: z.string() })
+  },
+  IO_ERROR: {
+    message: 'Filesystem operation failed',
+    data: z.object({ path: z.string().optional(), detail: z.string() })
+  },
+  PARSE_ERROR: {
+    message: 'Could not parse file',
+    data: z.object({
+      format: z.string(),
+      offset: z.number().int(),
+      section: z.string().optional(),
+      detail: z.string()
+    })
+  },
+  WRITE_ERROR: {
+    message: 'Could not serialize file',
+    data: z.object({
+      format: z.string(),
+      section: z.string().optional(),
+      detail: z.string()
+    })
+  },
+  UNSUPPORTED_FORMAT: {
+    message: 'Unsupported file format',
+    data: z.object({ detected: z.string(), detail: z.string() })
+  },
+  NOT_FOUND: {
+    message: 'Resource not found',
+    data: z.object({ kind: z.string(), id: z.string() })
+  },
+  DB_ERROR: {
+    message: 'Local database error',
+    data: z.object({ detail: z.string() })
+  }
+})
+
+export const appContract = {
+  settings: {
+    get: base.output(appSettingsSchema),
+    patch: base.input(appSettingsSchema.partial()).output(appSettingsSchema)
+  },
+  recents: {
+    list: base.output(z.array(recentEntrySchema)),
+    add: base
+      .input(z.object({ path: z.string().min(1), kind: recentKindSchema }))
+      .output(recentEntrySchema),
+    setPinned: base
+      .input(z.object({ id: z.number().int(), pinned: z.boolean() }))
+      .output(okSchema),
+    remove: base.input(z.object({ id: z.number().int() })).output(okSchema),
+    clear: base.output(okSchema)
+  },
+  windowState: {
+    get: base.output(windowStateSchema.nullable()),
+    set: base.input(windowStateSchema).output(okSchema)
+  },
+  workspace: {
+    get: base.output(workspaceSnapshotSchema),
+    set: base.input(workspaceSnapshotSchema).output(okSchema),
+    clear: base.output(okSchema)
+  }
+}
+
+export const dialogContract = {
+  openFolder: base
+    .output(z.object({ canceled: z.boolean(), path: z.string().nullable() })),
+  openFiles: base
+    .input(z.object({ purpose: openPurposeSchema, multiple: z.boolean().optional() }))
+    .output(z.object({ canceled: z.boolean(), paths: z.array(z.string()) })),
+  saveFileAs: base
+    .input(z.object({ purpose: openPurposeSchema, defaultName: z.string().optional() }))
+    .output(z.object({ canceled: z.boolean(), path: z.string().nullable() }))
+}
+
+export const archiveContract = {
+  open: base.input(z.object({ path: z.string().min(1) })).output(archiveDescriptorSchema),
+  get: base.input(z.object({ archiveId: z.string() })).output(archiveDescriptorSchema),
+  list: base.output(z.array(archiveDescriptorSchema)),
+  /** Supplies candidate names for a hash-only archive. */
+  recoverNames: base
+    .input(z.object({ archiveId: z.string(), candidates: z.array(z.string()) }))
+    .output(archiveDescriptorSchema),
+  save: base
+    .input(z.object({ archiveId: z.string(), path: z.string().optional() }))
+    .output(archiveDescriptorSchema),
+  close: base.input(z.object({ archiveId: z.string() })).output(okSchema)
+}
+
+export const layoutContract = {
+  open: base.input(z.object({ source: layoutSourceSchema })).output(openLayoutResultSchema),
+  list: base.output(z.array(layoutSummarySchema)),
+  /**
+   * Resolves the external layouts a prt1 part pane instantiates, so the canvas can
+   * draw the part's actual contents instead of an empty box.
+   *
+   * Batched by design: a layout can hold dozens of parts and one round trip per
+   * part would show the panel filling in piecemeal. Parts that cannot be found are
+   * returned as failures rather than omitted, so the UI can say which are missing.
+   */
+  parts: base
+    .input(z.object({ source: layoutSourceSchema, names: z.array(z.string()) }))
+    .output(
+      z.object({
+        resolved: z.array(z.object({ name: z.string(), document: layoutDocumentSchema })),
+        missing: z.array(z.object({ name: z.string(), detail: z.string() }))
+      })
+    ),
+  /**
+   * The renderer owns the working document and sends it back to be written, so
+   * canvas interaction never round-trips through IPC.
+   *
+   * `path` performs a save-as for a file-backed layout. It is rejected for a
+   * layout inside an archive: writing one entry to a loose file would silently
+   * detach it from the archive it belongs to, so the archive is saved instead.
+   */
+  save: base
+    .input(
+      z.object({
+        documentId: z.string(),
+        document: layoutDocumentSchema,
+        path: z.string().min(1).optional()
+      })
+    )
+    .output(
+      z.object({
+        bytes: z.number().int(),
+        dirty: z.boolean(),
+        /** Where it ended up; differs from the input on a save-as. */
+        source: layoutSourceSchema,
+        displayName: z.string()
+      })
+    ),
+  close: base.input(z.object({ documentId: z.string() })).output(okSchema)
+}
+
+/**
+ * Textures are addressed by the layout's own source, because that is what
+ * decides where to look for them: an entry in an archive searches that archive's
+ * texture folder first, a loose .bflyt searches the directory beside it.
+ */
+export const texturesContract = {
+  list: base.input(z.object({ source: layoutSourceSchema })).output(textureListSchema),
+  get: base
+    .input(
+      z.object({
+        source: layoutSourceSchema,
+        name: z.string().min(1),
+        mip: z.number().int().min(0).optional()
+      })
+    )
+    .output(decodedTextureSchema)
+}
+
+/**
+ * Animations are found relative to the layout they animate, the same way textures
+ * are: the archive's anim/ folder, then the rest of the archive, then the folder
+ * beside a loose .bflyt.
+ */
+export const animationContract = {
+  list: base
+    .input(z.object({ source: layoutSourceSchema }))
+    .output(z.array(animationCandidateSchema)),
+  open: base
+    .input(z.object({ source: layoutSourceSchema, key: z.string().min(1) }))
+    .output(openAnimationResultSchema),
+  close: base.input(z.object({ animationId: z.string() })).output(okSchema)
+}
+
+/**
+ * Browsing a folder on disk — a dumped romfs, in practice.
+ *
+ * Listings are per-directory, so opening a 60,000-file dump costs one readdir
+ * rather than a full walk.
+ */
+export const folderContract = {
+  list: base.input(z.object({ path: z.string().min(1) })).output(folderListingSchema),
+  /** Recognises what a file is by sniffing it, decompressing first if needed. */
+  identify: base
+    .input(z.object({ path: z.string().min(1) }))
+    .output(
+      z.object({
+        path: z.string(),
+        format: z.string(),
+        compression: compressionKindSchema,
+        /** How the editor can open it, if at all. */
+        opensAs: z.enum(['archive', 'layout', 'animation', 'texture', 'byml', 'none']),
+        detail: z.string()
+      })
+    )
+}
+
+export const contract = {
+  app: appContract,
+  dialog: dialogContract,
+  archive: archiveContract,
+  layout: layoutContract,
+  textures: texturesContract,
+  animation: animationContract,
+  folder: folderContract
+}
+
+export type Contract = typeof contract

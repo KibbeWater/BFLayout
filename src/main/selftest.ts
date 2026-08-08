@@ -1,0 +1,910 @@
+import { writeFile } from 'node:fs/promises'
+import { app, type BrowserWindow } from 'electron'
+
+/**
+ * Dev-only end-to-end check driven from the main process: it runs real RPC
+ * calls inside the renderer so the whole chain — MessagePort transport, zod
+ * validation, Effect services, sqlite, typed errors — is exercised in one go,
+ * then exits with a non-zero code if anything failed.
+ *
+ * Enabled with BFLAYOUT_SELFTEST=1. Point BFLAYOUT_SELFTEST_ARCHIVE at a .szs
+ * to include the archive pipeline (see `pnpm fixture:archive`).
+ * Never runs in a packaged app.
+ */
+export function runSelfTest(win: BrowserWindow): void {
+  if (app.isPackaged) return
+
+  win.webContents.on('console-message', (_event, _level, message) =>
+    console.log('[renderer]', message)
+  )
+
+  win.webContents.once('did-finish-load', () => {
+    void (async () => {
+      const existingPath = JSON.stringify(app.getPath('exe'))
+      const archivePath = JSON.stringify(process.env['BFLAYOUT_SELFTEST_ARCHIVE'] ?? '')
+
+      const script = `(async () => {
+        const out = []
+        const fail = (m) => out.push('FAIL ' + m)
+        const pass = (m) => out.push('PASS ' + m)
+        const check = (cond, m) => cond ? pass(m) : fail(m)
+
+        try {
+          // The client appears once the MessagePort handshake completes.
+          let c = window.__bfclient
+          for (let i = 0; i < 200 && !c; i++) {
+            await new Promise(r => setTimeout(r, 50))
+            c = window.__bfclient
+          }
+          if (!c) { fail('client never appeared on window'); return out }
+
+          // ---- settings ----
+          const s0 = await c.app.settings.get()
+          check(typeof s0.gridSize === 'number', 'settings.get returns defaults (gridSize=' + s0.gridSize + ')')
+
+          const s1 = await c.app.settings.patch({ gridSize: 48, showGrid: false })
+          check(s1.gridSize === 48 && s1.showGrid === false, 'settings.patch applies')
+          check((await c.app.settings.get()).gridSize === 48, 'settings round-trip through sqlite')
+
+          // ---- recents ----
+          const added = await c.app.recents.add({ path: ${existingPath}, kind: 'layout' })
+          check(!!added.id, 'recents.add returns a row (id=' + added.id + ')')
+          check((await c.app.recents.list()).some(r => r.id === added.id), 'recents.list contains it')
+
+          try {
+            await c.app.recents.add({ path: '/definitely/not/here.bflyt', kind: 'layout' })
+            fail('missing-file add should have thrown')
+          } catch (e) {
+            check(e && e.code === 'FILE_NOT_FOUND' && e.data && !!e.data.path,
+              'typed error FILE_NOT_FOUND carries data.path')
+          }
+
+          await c.app.recents.remove({ id: added.id })
+          check(!(await c.app.recents.list()).some(r => r.id === added.id), 'recents.remove deletes')
+
+          // ---- archive pipeline ----
+          const archivePath = ${archivePath}
+          if (!archivePath) {
+            out.push('SKIP archive checks (BFLAYOUT_SELFTEST_ARCHIVE not set)')
+          } else {
+            const expectedCompression = ${JSON.stringify(process.env['BFLAYOUT_SELFTEST_COMPRESSION'] ?? 'yaz0')}
+            const arch = await c.archive.open({ path: archivePath })
+            check(arch.entries.length > 0, 'archive.open lists ' + arch.entries.length + ' entries')
+            check(arch.compression === expectedCompression,
+              'archive.open detected ' + expectedCompression + ' compression (' + arch.compression + ')')
+            check(arch.hasNames && arch.unnamedCount === 0, 'archive has a full name table')
+
+            const layouts = arch.entries.filter(e => e.kind === 'layout')
+            const textures = arch.entries.filter(e => e.kind === 'texture')
+            check(layouts.length > 0 && textures.length > 0,
+              'entries classified by kind (' + layouts.length + ' layout, ' + textures.length + ' texture)')
+            check(arch.entries.every(e => e.displayName && e.size > 0), 'every entry has a name and size')
+
+            // Reopening must return the same session, not a second copy.
+            const again = await c.archive.open({ path: archivePath })
+            check(again.archiveId === arch.archiveId, 'reopening returns the existing session')
+            check((await c.archive.list()).length === 1, 'archive.list reports one open archive')
+
+            const described = await c.archive.get({ archiveId: arch.archiveId })
+            check(described.entries.length === arch.entries.length, 'archive.get matches archive.open')
+
+            try {
+              await c.archive.get({ archiveId: 'arch_does_not_exist' })
+              fail('unknown archiveId should have thrown')
+            } catch (e) {
+              check(e && e.code === 'NOT_FOUND', 'typed error NOT_FOUND for unknown archive')
+            }
+
+            // ---- layout pipeline ----
+            const layoutEntry = layouts[0]
+            const opened = await c.layout.open({
+              source: { kind: 'archive', archiveId: arch.archiveId, entryKey: layoutEntry.key }
+            })
+            const doc = opened.document
+            check(!!opened.documentId, 'layout.open returned a document id')
+            check(doc.info.width === 1280 && doc.info.height === 720,
+              'layout header decoded (' + doc.info.width + 'x' + doc.info.height + ')')
+            check(doc.platform === 'switch' && doc.version.major === 8,
+              'platform and version decoded (' + doc.platform + ' v' + doc.version.major + ')')
+            check(!!doc.rootPane && doc.rootPane.name === 'RootPane', 'root pane present')
+            check(doc.textures.length === 2 && doc.materials.length === 3,
+              'texture list and materials decoded')
+
+            const countPanes = (p) => 1 + p.children.reduce((n, c) => n + countPanes(c), 0)
+            const total = countPanes(doc.rootPane)
+            // root + background + title + panel, then 3 buttons x (button, caption, touch)
+            check(total === 13, 'full pane tree decoded (' + total + ' panes)')
+
+            const panel = doc.rootPane.children.find(p => p.kind === 'wnd1')
+            check(!!panel && panel.frames.length === 4, 'window pane kept its 4 frames')
+            const firstButton = panel && panel.children[0]
+            check(!!firstButton && firstButton.children.length === 2,
+              'nested children survived the push/pop markers')
+            const caption = firstButton && firstButton.children.find(p => p.kind === 'txt1')
+            check(!!caption && caption.text === 'Start',
+              'text pane string read from its offset (' + (caption && caption.text) + ')')
+
+            // Round-trip a real edit through save and reopen.
+            caption.text = 'Continue'
+            caption.dirty = true
+            const saved = await c.layout.save({ documentId: opened.documentId, document: doc })
+            check(saved.bytes > 0, 'layout.save wrote ' + saved.bytes + ' bytes')
+
+            const reopenedArchive = await c.archive.get({ archiveId: arch.archiveId })
+            check(reopenedArchive.dirty === true, 'archive marked dirty after the layout was saved')
+
+            await c.layout.close({ documentId: opened.documentId })
+            const again2 = await c.layout.open({
+              source: { kind: 'archive', archiveId: arch.archiveId, entryKey: layoutEntry.key }
+            })
+            const findText = (p) => p.kind === 'txt1' && p.name === 'Txt_Start'
+              ? p
+              : p.children.reduce((f, c) => f || findText(c), null)
+            const roundTripped = findText(again2.document.rootPane)
+            check(!!roundTripped && roundTripped.text === 'Continue',
+              'edit survived save and reopen (' + (roundTripped && roundTripped.text) + ')')
+
+            try {
+              await c.layout.open({
+                source: { kind: 'archive', archiveId: arch.archiveId, entryKey: 'timg/MainMenu.bntx' }
+              })
+              fail('opening a non-layout entry should have thrown')
+            } catch (e) {
+              check(e && e.code === 'UNSUPPORTED_FORMAT',
+                'typed error UNSUPPORTED_FORMAT for a non-layout entry')
+            }
+
+            // Textures. The point of decoding one here is the transport: RGBA
+            // rides as a Blob because oRPC has no Uint8Array case, and only a
+            // real round trip through the MessagePort proves that survives.
+            const layoutSource = {
+              kind: 'archive', archiveId: arch.archiveId, entryKey: layoutEntry.key
+            }
+            const texList = await c.textures.list({ source: layoutSource })
+            check(texList.unreadable.length === 0,
+              'every BNTX container parsed (' + texList.containerCount + ' found)')
+            check(texList.textures.length === 2 &&
+              texList.textures.some(t => t.name === 'MainMenu') &&
+              texList.textures.some(t => t.name === 'MainMenu_Frame'),
+              'textures.list found the textures in both containers')
+            const mainTex = texList.textures.find(t => t.name === 'MainMenu')
+            check(mainTex.width === 256 && mainTex.height === 128,
+              'texture dimensions read from BRTI (' + mainTex.width + 'x' + mainTex.height + ')')
+            check(mainTex.format === 'R8G8B8A8_Unorm' && mainTex.decodable === true,
+              'texture format is decodable (' + mainTex.format + ')')
+
+            // The layout's texture list spells it "MainMenu.bntx" while the BNTX
+            // calls it "MainMenu"; resolution has to bridge that.
+            const decodedTex = await c.textures.get({
+              source: layoutSource, name: doc.textures[0]
+            })
+            check(decodedTex.width === 256 && decodedTex.height === 128,
+              'textures.get decoded ' + decodedTex.width + 'x' + decodedTex.height)
+            const rgba = new Uint8Array(await decodedTex.rgba.arrayBuffer())
+            check(rgba.length === 256 * 128 * 4,
+              'RGBA survived the MessagePort as ' + rgba.length + ' bytes')
+            // Bottom-right of the test pattern: full red and green ramp, and the
+            // grid line at x=224 is behind us, so blue is the off value.
+            const last = (127 * 256 + 255) * 4
+            check(rgba[last] === 255 && rgba[last + 1] === 255 && rgba[last + 2] === 96 &&
+              rgba[last + 3] === 255,
+              'deswizzled pixels are correct at the far corner')
+
+            // ---- folder browsing ----
+            // A romfs dump is browsed one directory at a time; the archive's own
+            // folder stands in for one here.
+            const folderPath = archivePath.substring(0, archivePath.lastIndexOf('/'))
+            const listing = await c.folder.list({ path: folderPath })
+            check(listing.path === folderPath && listing.parent !== null,
+              'folder.list returned the directory and its parent')
+            check(listing.entries.some(e => e.name.endsWith('.szs')),
+              'folder.list found the archive (' + listing.entries.length + ' entries)')
+            const archiveEntry = listing.entries.find(e => e.name.endsWith('.szs'))
+            check((archiveEntry.kind === 'archive' || archiveEntry.kind === 'layoutArchive') &&
+              archiveEntry.size > 0 && archiveEntry.compressed,
+              'the archive is classified and marked compressed')
+
+            const identified = await c.folder.identify({ path: archivePath })
+            check(identified.format === 'SARC' && identified.opensAs === 'archive',
+              'folder.identify sniffed it as a SARC (' + identified.format + ')')
+            check(identified.compression === expectedCompression,
+              'folder.identify reported ' + identified.compression + ' compression')
+
+            const notALayout = await c.folder.identify({ path: ${existingPath} })
+            check(notALayout.opensAs === 'none',
+              'folder.identify refuses to open something unrecognised')
+
+            try {
+              await c.folder.list({ path: '/definitely/not/a/folder' })
+              fail('listing a missing folder should have thrown')
+            } catch (e) {
+              check(e && e.code === 'FILE_NOT_FOUND', 'typed error FILE_NOT_FOUND for a missing folder')
+            }
+
+            // ---- workspace ----
+            const emptySession = await c.app.workspace.get()
+            check(Array.isArray(emptySession.archives) && Array.isArray(emptySession.layouts),
+              'workspace.get returns a snapshot shape')
+
+            await c.app.workspace.set({
+              archives: [archivePath],
+              layouts: [{ archivePath: archivePath, entryKey: layoutEntry.key }]
+            })
+            const savedSession = await c.app.workspace.get()
+            check(savedSession.archives.length === 1 && savedSession.archives[0] === archivePath,
+              'workspace round-trips the archive path through sqlite')
+            check(savedSession.layouts.length === 1 &&
+              savedSession.layouts[0].entryKey === layoutEntry.key,
+              'workspace round-trips the open layout')
+
+            await c.app.workspace.clear()
+            check((await c.app.workspace.get()).archives.length === 0,
+              'workspace.clear empties the session')
+
+            // ---- animations ----
+            const anims = await c.animation.list({ source: layoutSource })
+            check(anims.length === 2, 'animation.list found ' + anims.length + ' animations')
+            check(anims.every(a => a.displayName.endsWith('.bflan') && a.size > 0),
+              'every animation candidate has a name and size')
+
+            const intro = anims.find(a => a.displayName.includes('_In'))
+            const openedAnim = await c.animation.open({ source: layoutSource, key: intro.key })
+            const animDoc = openedAnim.document
+            check(!!openedAnim.animationId, 'animation.open returned an id')
+            check(animDoc.tag && animDoc.tag.name === 'MainMenu_In',
+              'pat1 name decoded (' + (animDoc.tag && animDoc.tag.name) + ')')
+            check(animDoc.info && animDoc.info.frameSize === 30 && animDoc.info.loop === false,
+              'pai1 frame size and loop flag decoded')
+            check(animDoc.info.entries.length === 2,
+              'both animated panes decoded (' + animDoc.info.entries.length + ')')
+
+            const panelEntry = animDoc.info.entries.find(e => e.name === 'Wnd_Panel')
+            check(!!panelEntry && panelEntry.tags.length === 2,
+              'the panel entry kept its FLPA and FLVC tags')
+            const flpa = panelEntry && panelEntry.tags.find(t => t.signature === 'FLPA')
+            check(!!flpa && flpa.components.length === 2,
+              'FLPA kept both animated components')
+            const translateY = flpa && flpa.components.find(cp => cp.target === 1)
+            check(!!translateY && translateY.curve === 'hermite' &&
+              translateY.keyframes.length === 2 && translateY.keyframes[0].value === -400,
+              'hermite keyframes survived the round trip')
+
+            const titleEntry = animDoc.info.entries.find(e => e.name === 'Txt_Title')
+            const flvi = titleEntry && titleEntry.tags[0]
+            check(!!flvi && flvi.signature === 'FLVI' && flvi.components[0].curve === 'step',
+              'the step-curve visibility track survived')
+
+            // Reopening the same animation must reuse the session.
+            const againAnim = await c.animation.open({ source: layoutSource, key: intro.key })
+            check(againAnim.animationId === openedAnim.animationId,
+              'reopening an animation returns the existing session')
+
+            try {
+              await c.animation.open({ source: layoutSource, key: layoutEntry.key })
+              fail('opening a layout as an animation should have thrown')
+            } catch (e) {
+              check(e && e.code === 'UNSUPPORTED_FORMAT',
+                'typed error UNSUPPORTED_FORMAT for a non-animation')
+            }
+
+            await c.animation.close({ animationId: openedAnim.animationId })
+
+            // ---- save-as ----
+            // A layout inside an archive must refuse a loose-file save-as: the
+            // copy would look saved while staying detached from its archive.
+            try {
+              await c.layout.save({
+                documentId: again2.documentId,
+                document: again2.document,
+                path: archivePath + '.detached.bflyt'
+              })
+              fail('save-as on an archive entry should have been refused')
+            } catch (e) {
+              check(e && e.code === 'WRITE_ERROR',
+                'typed error WRITE_ERROR refusing to detach an archive entry')
+            }
+
+            // Saving the archive to a new path leaves the original alone.
+            const copyPath = archivePath + '.copy.szs'
+            const copied = await c.archive.save({ archiveId: arch.archiveId, path: copyPath })
+            check(copied.path === copyPath && copied.dirty === false,
+              'archive save-as wrote ' + copied.displayName + ' and cleared dirty')
+
+            const reopenedCopy = await c.archive.open({ path: copyPath })
+            check(reopenedCopy.entries.length === arch.entries.length,
+              'the saved copy reopens with all ' + reopenedCopy.entries.length + ' entries')
+            const copyLayout = reopenedCopy.entries.find(e => e.kind === 'layout')
+            const fromCopy = await c.layout.open({
+              source: { kind: 'archive', archiveId: reopenedCopy.archiveId, entryKey: copyLayout.key }
+            })
+            const copyText = findText(fromCopy.document.rootPane)
+            check(!!copyText && copyText.text === 'Continue',
+              'the edit survived into the saved copy')
+            await c.layout.close({ documentId: fromCopy.documentId })
+            await c.archive.close({ archiveId: reopenedCopy.archiveId })
+
+            try {
+              await c.textures.get({ source: layoutSource, name: 'NoSuchTexture' })
+              fail('requesting a missing texture should have thrown')
+            } catch (e) {
+              check(e && e.code === 'NOT_FOUND', 'typed error NOT_FOUND for an unknown texture')
+            }
+
+            await c.archive.close({ archiveId: arch.archiveId })
+            check((await c.archive.list()).length === 0, 'archive.close releases the session')
+
+            try {
+              await c.archive.open({ path: ${existingPath} })
+              fail('opening a non-archive should have thrown')
+            } catch (e) {
+              check(e && e.code === 'UNSUPPORTED_FORMAT', 'typed error UNSUPPORTED_FORMAT for a non-archive')
+            }
+          }
+        } catch (e) {
+          fail('threw: ' + (e && e.message ? e.message : String(e)))
+        }
+        return out
+      })()`
+
+      try {
+        const results = (await win.webContents.executeJavaScript(script)) as string[]
+        results.push(...(await checkEditorRenders(win, archivePath)))
+        for (const line of results) console.log('[selftest]', line)
+        const failed = results.filter((line) => line.startsWith('FAIL'))
+        const passed = results.filter((line) => line.startsWith('PASS'))
+        console.log(
+          `[selftest] ${passed.length} passed, ${failed.length} failed, ` +
+            `${results.length - passed.length - failed.length} skipped`
+        )
+        app.exit(failed.length > 0 ? 1 : 0)
+      } catch (cause) {
+        console.error('[selftest] harness error:', cause)
+        app.exit(1)
+      }
+    })()
+  })
+}
+
+/**
+ * Drives the real editor UI: opens the fixture layout into the document store,
+ * navigates to the editor route, waits for the WebGL canvas to paint, then reads
+ * the window back with capturePage.
+ *
+ * This is the only way to check the GL pipeline from the outside. The canvas is
+ * created without preserveDrawingBuffer, so toDataURL and readPixels both come
+ * back blank; compositing the window is what actually samples what was drawn.
+ *
+ * Set BFLAYOUT_SELFTEST_SHOT to also write the capture to a PNG for eyeballing.
+ */
+async function checkEditorRenders(win: BrowserWindow, archivePath: string): Promise<string[]> {
+  const out: string[] = []
+  const check = (condition: boolean, message: string): void => {
+    out.push(`${condition ? 'PASS' : 'FAIL'} ${message}`)
+  }
+
+  if (archivePath === '""') return out
+
+  /**
+   * The blank-canvas regression: navigating to the editor before any document
+   * exists used to leave the WebGL renderer uncreated forever, because the effect
+   * that built it ran while the canvas element was still absent. The DOM overlays
+   * kept drawing, so a selected pane showed its handles over an empty canvas.
+   *
+   * Order matters here — editor first, layout second — which is exactly what
+   * opening a folder does.
+   */
+  const blankCanvas = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    await dev.router.navigate({ to: '/editor' })
+    await new Promise(r => setTimeout(r, 400))
+    const canvasBefore = document.querySelector('canvas') !== null
+    const rendererBefore = !!dev.renderer
+
+    const c = window.__bfclient
+    const arch = await c.archive.open({ path: ${archivePath} })
+    const entry = arch.entries.find(e => e.kind === 'layout')
+    const opened = await c.layout.open({
+      source: { kind: 'archive', archiveId: arch.archiveId, entryKey: entry.key }
+    })
+    dev.documents.getState().openTab({
+      documentId: opened.documentId,
+      displayName: opened.displayName,
+      source: opened.source,
+      document: opened.document
+    })
+
+    let canvas = null
+    for (let i = 0; i < 60 && !canvas; i++) {
+      await new Promise(r => requestAnimationFrame(r))
+      canvas = document.querySelector('canvas')
+    }
+    await new Promise(r => setTimeout(r, 400))
+    const result = {
+      canvasBefore,
+      rendererBefore,
+      canvasAfter: canvas !== null,
+      rendererAfter: !!dev.renderer,
+      // A renderer that ran has a flattened tree; a missing one has nothing.
+      flattened: dev.renderer ? dev.renderer.flattened.length : 0
+    }
+
+    // Clean up: later phases assume they own the tab list and the archive session.
+    dev.documents.getState().closeTab(opened.documentId)
+    await c.layout.close({ documentId: opened.documentId })
+    await c.archive.close({ archiveId: arch.archiveId })
+    return result
+  })()`)) as {
+    canvasBefore?: boolean
+    rendererBefore?: boolean
+    canvasAfter?: boolean
+    rendererAfter?: boolean
+    flattened?: number
+  }
+
+  check(blankCanvas.canvasBefore === false, 'no canvas is mounted before a layout is open')
+  check(blankCanvas.canvasAfter === true, 'the canvas mounts once a layout opens')
+  check(
+    blankCanvas.rendererAfter === true,
+    'the WebGL renderer is created when the canvas appears after mount'
+  )
+  check(
+    (blankCanvas.flattened ?? 0) > 1,
+    `the renderer drew the pane tree (${blankCanvas.flattened} panes)`
+  )
+
+  const setup = `(async () => {
+    const dev = window.__bfdev
+    if (!dev) return { error: 'dev handle missing' }
+    const c = window.__bfclient
+
+    const arch = await c.archive.open({ path: ${archivePath} })
+    const entry = arch.entries.find(e => e.kind === 'layout')
+    if (!entry) return { error: 'fixture has no layout entry' }
+    const source = { kind: 'archive', archiveId: arch.archiveId, entryKey: entry.key }
+    const opened = await c.layout.open({ source })
+
+    dev.workspace.getState().setActiveArchive(arch.archiveId)
+    dev.documents.getState().openTab({
+      documentId: opened.documentId,
+      displayName: opened.displayName,
+      source: opened.source,
+      document: opened.document
+    })
+    await dev.router.navigate({ to: '/editor' })
+
+    // Wait for the canvas to exist, then for the texture fetch behind it.
+    let canvas = null
+    for (let i = 0; i < 100 && !canvas; i++) {
+      await new Promise(r => requestAnimationFrame(r))
+      canvas = document.querySelector('canvas')
+    }
+    if (!canvas) return { error: 'no canvas mounted in the editor' }
+    await new Promise(r => setTimeout(r, 1200))
+
+    // Select the window pane so the properties panel and its material section
+    // mount: they are the densest UI in the app and the likeliest to throw.
+    const findWindow = (p) => p.kind === 'wnd1'
+      ? p
+      : p.children.reduce((f, c) => f || findWindow(c), null)
+    const windowPane = findWindow(opened.document.rootPane)
+    if (windowPane) {
+      dev.documents.getState().select([windowPane.id])
+      await new Promise(r => setTimeout(r, 400))
+    }
+    const propertyInputs = document.querySelectorAll('aside:last-of-type input, aside:last-of-type select')
+
+    // Resize handles appear for a single selection. Eight of them, or the handle
+    // hit-testing has nothing to grab.
+    const handleCount = () =>
+      [...document.querySelectorAll('div')].filter(d => /-resize$/.test(d.style.cursor)).length
+    const handlesForOne = handleCount()
+    dev.documents.getState().select([])
+    await new Promise(r => setTimeout(r, 200))
+    const handlesForNone = handleCount()
+    if (windowPane) {
+      dev.documents.getState().select([windowPane.id])
+      await new Promise(r => setTimeout(r, 200))
+    }
+
+    // Marquee selection over the whole canvas should pick up every pane but the
+    // root, exercised through the shared geometry the canvas uses.
+    const marqueeHits = dev.editing.panesInRect(dev.renderer.flattened, [-2000, -2000, 2000, 2000], { includeHidden: true }).length
+
+    // Add a pane through the hierarchy UI, then undo it. Add/delete are the only
+    // structural edits, so they get checked against the real buttons.
+    const state = dev.documents.getState()
+    const activeTab = state.tabs.find(t => t.documentId === state.activeId) || state.tabs[0]
+    const beforeAdd = activeTab.document
+    const countTree = (p) => 1 + p.children.reduce((n, c) => n + countTree(c), 0)
+    const paneCountBefore = countTree(beforeAdd.rootPane)
+    const addButton = [...document.querySelectorAll('button')]
+      .find(b => b.textContent.trim() === 'Add')
+    let structuralResult = 'no Add button in the hierarchy panel'
+    if (addButton) {
+      addButton.click()
+      await new Promise(r => setTimeout(r, 200))
+      const pictureOption = [...document.querySelectorAll('button')]
+        .find(b => b.textContent.trim() === 'Picture')
+      if (!pictureOption) {
+        structuralResult = 'the Add menu did not open'
+      } else {
+        pictureOption.click()
+        await new Promise(r => setTimeout(r, 300))
+        const current = () => {
+          const st = dev.documents.getState()
+          return (st.tabs.find(t => t.documentId === st.activeId) || st.tabs[0]).document.rootPane
+        }
+        const afterAdd = countTree(current())
+        dev.documents.getState().undo()
+        await new Promise(r => setTimeout(r, 200))
+        const afterUndo = countTree(current())
+        structuralResult = JSON.stringify({ paneCountBefore, afterAdd, afterUndo })
+      }
+    }
+
+    // Browse a real romfs when one is pointed at, and open a layout archive out of
+  // it the way the folder browser does: sniff, then open.
+  let romfsResult = 'skipped'
+  const romfs = ${JSON.stringify(process.env['BFLAYOUT_SELFTEST_ROMFS'] ?? '')}
+  if (romfs) {
+    const top = await c.folder.list({ path: romfs })
+    const layoutDir = top.entries.find(e => e.kind === 'directory' && e.name === 'Layout')
+    if (!layoutDir) {
+      romfsResult = 'no Layout directory in ' + romfs
+    } else {
+      const inner = await c.folder.list({ path: layoutDir.path })
+      // .blarc classifies as layoutArchive now; both are containers this can open.
+      const first = inner.entries.find(e => e.kind === 'layoutArchive' || e.kind === 'archive')
+      const ident = await c.folder.identify({ path: first.path })
+      const arc = await c.archive.open({ path: first.path })
+      const lay = arc.entries.find(e => e.kind === 'layout')
+      const doc = await c.layout.open({
+        source: { kind: 'archive', archiveId: arc.archiveId, entryKey: lay.key }
+      })
+      const count = (p) => 1 + p.children.reduce((n, k) => n + count(k), 0)
+      const tex = await c.textures.list({ source: doc.source })
+      const anims = await c.animation.list({ source: doc.source })
+      romfsResult = JSON.stringify({
+        topEntries: top.entries.length,
+        layoutFiles: inner.entries.length,
+        name: first.name,
+        format: ident.format,
+        compression: ident.compression,
+        panes: count(doc.document.rootPane),
+        materials: doc.document.materials.length,
+        textures: tex.textures.length,
+        decodable: tex.textures.filter(t => t.decodable).length,
+        anims: anims.length
+      })
+      await c.layout.close({ documentId: doc.documentId })
+      await c.archive.close({ archiveId: arc.archiveId })
+    }
+  }
+
+  // Expand the animation dock, load the intro animation, and scrub it. The
+    // point is to prove overrides reach the canvas: the panel's Y translation is
+    // keyed from -400 to -40, so its world position must differ between frames.
+    //
+    // Every lookup is scoped to the dock's own <section>. The archive browser
+    // lists the same .bflan filenames, so an unscoped text search finds its rows
+    // instead and silently tests nothing.
+    let animationResult = 'the animation dock did not render'
+    const dock = [...document.querySelectorAll('section')]
+      .find(s => s.textContent.trim().startsWith('ANIMATION') || s.textContent.trim().startsWith('Animation'))
+    if (dock) {
+      const toggle = dock.querySelector('button')
+      toggle.click()
+      let row = null
+      for (let i = 0; i < 40 && !row; i++) {
+        await new Promise(r => setTimeout(r, 100))
+        row = [...dock.querySelectorAll('button')].find(b => b.textContent.includes('MainMenu_In.bflan'))
+      }
+
+      if (!row) {
+        animationResult = 'the intro animation was not listed in the dock: ' + dock.innerText.slice(0, 200)
+      } else {
+        row.click()
+        for (let i = 0; i < 40 && !dev.playback.getState().document; i++) {
+          await new Promise(r => setTimeout(r, 100))
+        }
+
+        const playback = dev.playback.getState()
+        const panelWorldY = () => {
+          const hit = dev.renderer.flattened.find(e => e.pane.name === 'Wnd_Panel')
+          return hit ? hit.world[5] : null
+        }
+
+        playback.setFrame(0)
+        await new Promise(r => requestAnimationFrame(r))
+        await new Promise(r => requestAnimationFrame(r))
+        const atStart = panelWorldY()
+
+        playback.setFrame(20)
+        await new Promise(r => requestAnimationFrame(r))
+        await new Promise(r => requestAnimationFrame(r))
+        const atEnd = panelWorldY()
+
+        const st = dev.documents.getState()
+      const active = st.tabs.find(t => t.documentId === st.activeId) || st.tabs[0]
+      const layoutPane = findWindow(active.document.rootPane)
+
+        animationResult = JSON.stringify({
+          frames: playback.document ? playback.document.info.frameSize : 0,
+          keyedTracks: dock.querySelectorAll('span[title^="frame"]').length,
+          atStart,
+          atEnd,
+          documentTranslateY: layoutPane ? layoutPane.translate[1] : null
+        })
+      }
+    }
+
+    // Every texture the layout names must have reached the GPU. Checking the
+    // store beats sampling pixels: the fixture's own test pattern contains the
+    // same magenta the missing-texture placeholder uses.
+    const names = opened.document.textures
+    const states = names.map(n => {
+      const entry = dev.renderer && dev.renderer.textures.stateOf(n)
+      return n + '=' + (entry ? entry.state + (entry.detail ? ' (' + entry.detail + ')' : '') : 'never requested')
+    })
+
+    return {
+      width: canvas.width,
+      height: canvas.height,
+      panes: dev.documents.getState().tabs.length,
+      toastErrors: document.querySelectorAll('[data-toast-error]').length,
+      propertyInputs: propertyInputs.length,
+      romfsResult,
+      handlesForOne,
+      handlesForNone,
+      marqueeHits,
+      structuralResult,
+      animationResult,
+      textureStates: states
+    }
+  })()`
+
+  const info = (await win.webContents.executeJavaScript(setup)) as {
+    error?: string
+    width?: number
+    height?: number
+    panes?: number
+    toastErrors?: number
+    propertyInputs?: number
+    romfsResult?: string
+    handlesForOne?: number
+    handlesForNone?: number
+    marqueeHits?: number
+    structuralResult?: string
+    animationResult?: string
+    textureStates?: string[]
+  }
+
+  if (info.error) {
+    check(false, `editor UI: ${info.error}`)
+    return out
+  }
+
+  check((info.width ?? 0) > 100 && (info.height ?? 0) > 100, `canvas sized ${info.width}x${info.height}`)
+  check(info.panes === 1, 'the layout opened as one editor tab')
+  check(info.toastErrors === 0, 'no error toast while opening the editor')
+  // A window pane exposes pane, transform, window and material fields; if the
+  // material section threw, this collapses to a handful.
+  check(
+    (info.propertyInputs ?? 0) > 25,
+    `the properties panel rendered ${info.propertyInputs} editable fields`
+  )
+
+  const romfs = info.romfsResult ?? 'skipped'
+  if (romfs === 'skipped') {
+    out.push('SKIP romfs browsing (BFLAYOUT_SELFTEST_ROMFS not set)')
+  } else if (!romfs.startsWith('{')) {
+    check(false, `romfs browsing: ${romfs}`)
+  } else {
+    const r = JSON.parse(romfs) as Record<string, number | string>
+    check(Number(r['topEntries']) > 0, `romfs root listed ${r['topEntries']} entries`)
+    check(Number(r['layoutFiles']) > 0, `Layout/ listed ${r['layoutFiles']} files`)
+    check(r['format'] === 'SARC', `sniffed ${r['name']} as ${r['format']} (${r['compression']})`)
+    check(Number(r['panes']) > 1, `parsed a real layout: ${r['panes']} panes, ${r['materials']} materials`)
+    check(Number(r['textures']) > 0, `found ${r['textures']} textures, ${r['decodable']} decodable`)
+    check(Number(r['anims']) > 0, `found ${r['anims']} animations beside it`)
+  }
+
+  check(info.handlesForOne === 8, `eight resize handles drawn for one selected pane (${info.handlesForOne})`)
+  check(info.handlesForNone === 0, `no handles with nothing selected (${info.handlesForNone})`)
+  // 13 panes, minus the root the marquee deliberately skips.
+  check(info.marqueeHits === 12, `a full-canvas marquee selected ${info.marqueeHits} panes`)
+
+  const structural = info.structuralResult ?? ''
+  if (!structural.startsWith('{')) {
+    check(false, `add/delete pane: ${structural}`)
+  } else {
+    const parsed = JSON.parse(structural) as {
+      paneCountBefore: number
+      afterAdd: number
+      afterUndo: number
+    }
+    check(
+      parsed.afterAdd === parsed.paneCountBefore + 1,
+      `adding a pane through the UI grew the tree (${parsed.paneCountBefore} -> ${parsed.afterAdd})`
+    )
+    check(
+      parsed.afterUndo === parsed.paneCountBefore,
+      `undo removed the added pane again (${parsed.afterUndo})`
+    )
+  }
+
+  const animation = info.animationResult ?? ''
+  if (!animation.startsWith('{')) {
+    check(false, `animation dock: ${animation}`)
+  } else {
+    const parsed = JSON.parse(animation) as {
+      frames: number
+      keyedTracks: number
+      atStart: number | null
+      atEnd: number | null
+      documentTranslateY: number | null
+    }
+    check(parsed.frames === 30, `the dock loaded a ${parsed.frames}-frame animation`)
+    check(parsed.keyedTracks > 0, `the timeline drew ${parsed.keyedTracks} keyframe markers`)
+    check(
+      parsed.atStart === -400 && parsed.atEnd === -40,
+      `scrubbing moved the pane in world space (${parsed.atStart} -> ${parsed.atEnd})`
+    )
+    // The whole point of the override layer: playback leaves the document alone.
+    check(
+      parsed.documentTranslateY === -40,
+      `playback did not write into the layout document (translate Y stayed ${parsed.documentTranslateY})`
+    )
+  }
+
+  const states = info.textureStates ?? []
+  check(states.length > 0, `the layout references ${states.length} texture(s)`)
+  for (const state of states) {
+    check(state.endsWith('=ready'), `texture uploaded to the GPU: ${state}`)
+  }
+
+  // The texture panel decodes independently of the canvas, so it needs its own
+  // check: a thumbnail only gets a size once its RGBA arrived and drew.
+  const panel = (await win.webContents.executeJavaScript(`(async () => {
+    const tab = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'textures')
+    if (!tab) return { error: 'no textures tab in the sidebar' }
+    tab.click()
+    await new Promise(r => setTimeout(r, 1200))
+    const rows = document.querySelectorAll('li canvas')
+    return {
+      rows: rows.length,
+      drawn: [...rows].filter(c => c.width > 0 && c.height > 0).length
+    }
+  })()`)) as { error?: string; rows?: number; drawn?: number }
+
+  if (panel.error) {
+    check(false, `texture panel: ${panel.error}`)
+  } else {
+    check((panel.rows ?? 0) > 0, `texture panel listed ${panel.rows} texture(s)`)
+    check(panel.drawn === panel.rows, `every thumbnail decoded and drew (${panel.drawn}/${panel.rows})`)
+  }
+
+  // The folder browser is the entry point for a romfs dump, so drive it through the
+  // real sidebar tab rather than only through RPC.
+  const folder = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const romfs = ${JSON.stringify(process.env['BFLAYOUT_SELFTEST_ROMFS'] ?? '')}
+    if (!romfs) return { skipped: true }
+    dev.folder.getState().open(romfs)
+    const tab = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'files')
+    if (!tab) return { error: 'no files tab in the sidebar' }
+    tab.click()
+    let rows = []
+    for (let i = 0; i < 40 && rows.length === 0; i++) {
+      await new Promise(r => setTimeout(r, 100))
+      rows = [...document.querySelectorAll('button')].filter(b => b.title.startsWith(romfs))
+    }
+    // Tree mode: expanding Layout/ should list its files in place.
+    const layoutRow = rows.find(b => b.title === romfs + '/Layout')
+    if (layoutRow) {
+      layoutRow.click()
+      await new Promise(r => setTimeout(r, 1500))
+    }
+    const after = [...document.querySelectorAll('button')].filter(b => b.title.startsWith(romfs + '/Layout/'))
+    // Clicking a real layout archive should put a document on the canvas.
+    const archiveRow = after.find(b => b.textContent.includes('.blarc'))
+    let openedTab = null
+    if (archiveRow) {
+      // A tab is already open from the fixture, so wait for the count to *grow*.
+      // Reading the last tab without that check passes whether or not the click
+      // did anything, which is worse than no check at all.
+      const before = dev.documents.getState().tabs.length
+      archiveRow.click()
+      for (let i = 0; i < 80 && dev.documents.getState().tabs.length === before; i++) {
+        await new Promise(r => setTimeout(r, 100))
+      }
+      const tabs = dev.documents.getState().tabs
+      openedTab = tabs.length > before ? tabs[tabs.length - 1].displayName : null
+    }
+    return { rows: rows.length, afterEnter: after.length, openedTab }
+  })()`)) as {
+    skipped?: boolean
+    error?: string
+    rows?: number
+    afterEnter?: number
+    openedTab?: string | null
+  }
+
+  if (folder.skipped) {
+    out.push('SKIP folder browser UI (BFLAYOUT_SELFTEST_ROMFS not set)')
+  } else if (folder.error) {
+    check(false, `folder browser: ${folder.error}`)
+  } else {
+    check((folder.rows ?? 0) > 0, `the folder browser listed ${folder.rows} entries`)
+    check(
+      (folder.afterEnter ?? 0) > 100,
+      `expanding Layout/ listed ${folder.afterEnter} files in place`
+    )
+    // The bug this guards: clicking a .blarc used to open a container and leave the
+    // canvas empty, which is indistinguishable from nothing happening.
+    check(
+      typeof folder.openedTab === 'string' && folder.openedTab.endsWith('.bflyt'),
+      `clicking a layout archive opened ${folder.openedTab}`
+    )
+  }
+
+  // Panel visibility is persisted in settings and driven from both the toolbar and
+  // the native View menu, so check the toggles actually add and remove regions.
+  const panelResult = (await win.webContents.executeJavaScript(`(async () => {
+    const asides = () => document.querySelectorAll('aside').length
+    const before = asides()
+    const propsToggle = [...document.querySelectorAll('button')]
+      .find(b => (b.title || '').startsWith('Hide properties'))
+    if (!propsToggle) return { error: 'no properties toggle in the toolbar' }
+    propsToggle.click()
+    await new Promise(r => setTimeout(r, 500))
+    const hidden = asides()
+    propsToggle.click()
+    await new Promise(r => setTimeout(r, 500))
+    const restored = asides()
+    return { before, hidden, restored }
+  })()`)) as { error?: string; before?: number; hidden?: number; restored?: number }
+
+  if (panelResult.error) {
+    check(false, `panel toggles: ${panelResult.error}`)
+  } else {
+    check(
+      panelResult.hidden === (panelResult.before ?? 0) - 1,
+      `hiding the properties panel removed a region (${panelResult.before} -> ${panelResult.hidden})`
+    )
+    check(
+      panelResult.restored === panelResult.before,
+      `showing it again restored the region (${panelResult.restored})`
+    )
+  }
+
+  // Fit and deselect before the capture, so the screenshot shows the layout rather
+  // than whatever corner the camera happened to be in.
+  await win.webContents.executeJavaScript(`(async () => {
+    window.__bfdev.documents.getState().select([])
+    window.dispatchEvent(new CustomEvent('bflayout-command', { detail: 'fit' }))
+    await new Promise(r => setTimeout(r, 400))
+  })()`)
+
+  const image = await win.webContents.capturePage()
+  const { width, height } = image.getSize()
+  const pixels = image.toBitmap() // BGRA, row-major
+  check(width > 0 && height > 0, `captured the window at ${width}x${height}`)
+
+  // A blank or flat-shaded canvas collapses to a handful of colour buckets; the
+  // decoded test pattern spans many. This is a smoke check on "something was
+  // actually drawn", not on correctness — the screenshot is for that.
+  const distinct = new Set<string>()
+  for (let i = 0; i < pixels.length; i += 4) {
+    distinct.add(`${pixels[i + 2]! >> 4},${pixels[i + 1]! >> 4},${pixels[i]! >> 4}`)
+  }
+  check(distinct.size > 64, `the window drew ${distinct.size} distinct colours`)
+
+  const shot = process.env['BFLAYOUT_SELFTEST_SHOT']
+  if (shot) {
+    await writeFile(shot, image.toPNG())
+    console.log(`[selftest] wrote ${shot}`)
+  }
+
+  return out
+}

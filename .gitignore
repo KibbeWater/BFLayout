@@ -1,0 +1,13 @@
+node_modules/
+out/
+dist/
+release/
+*.log
+.DS_Store
+.vite/
+# Real game files must never be committed; point BFLAYOUT_FIXTURES at them
+# instead. The ASTC vectors are the exception: they are generated from synthetic
+# images by astcenc, contain nothing copyrighted, and the unit tests need them.
+tests/fixtures/*
+!tests/fixtures/astc-vectors.json
+*.tsbuildinfo

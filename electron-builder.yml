@@ -1,0 +1,68 @@
+# Packaging config for `pnpm package`.
+#
+# Two things here are load-bearing rather than boilerplate:
+#
+#   extraResources  ships the drizzle migration SQL. The database is created on
+#                   first launch by running those migrations, so a build without
+#                   them starts and then fails on the first query. PathsLive
+#                   resolves them from process.resourcesPath when packaged.
+#   asarUnpack      better-sqlite3 is a native module and cannot be loaded from
+#                   inside an asar archive.
+appId: dev.bflayout.app
+productName: BFLayout
+copyright: BFLayout contributors
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - out/**
+  - package.json
+
+extraResources:
+  - from: drizzle
+    to: drizzle
+    filter: ['**/*']
+
+asarUnpack:
+  - '**/node_modules/better-sqlite3/**'
+
+# Layout files and the archives they ship in. Registering these makes
+# "Open with" work, which is how most people will reach the app.
+fileAssociations:
+  - ext: bflyt
+    name: Nintendo layout
+    role: Editor
+  - ext: bflan
+    name: Nintendo layout animation
+    role: Viewer
+  - ext: szs
+    name: Compressed SARC archive
+    role: Editor
+  - ext: sarc
+    name: SARC archive
+    role: Editor
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  # Nothing here is signed or notarised: there are no credentials to do it with,
+  # and a build that claims to be signed but is not is worse than one that does
+  # not claim it. Expect Gatekeeper to complain on another machine.
+  identity: null
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+
+linux:
+  category: Development
+  target:
+    - target: AppImage
+      arch: [x64]
+
+npmRebuild: false
