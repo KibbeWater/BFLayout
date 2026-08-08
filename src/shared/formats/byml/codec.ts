@@ -54,10 +54,26 @@ interface ParseContext {
    */
   readonly visiting: Set<number>
   depth: number
+  /**
+   * Nodes produced so far, against a hard ceiling.
+   *
+   * `visiting` only catches cycles — it releases each offset on the way back out, so
+   * a *shared* subtree is legitimately re-parsed once per reference. That makes the
+   * tree a DAG, and a 400-byte file with 24 levels of two references each expands
+   * toward 2^24 nodes. This runs in the main process, so without a budget one
+   * malformed document in a browsed dump takes the whole app down with it.
+   */
+  nodes: number
 }
 
 /** Deep enough for any real document; a cycle or corruption hits this instead. */
 const MAX_DEPTH = 128
+
+/**
+ * Ceiling on total nodes. The largest document this game ships is 19,369, so this
+ * is two orders of magnitude of headroom while still bounding a crafted DAG.
+ */
+const MAX_NODES = 2_000_000
 
 export function parseByml(data: Uint8Array): BymlDocument {
   if (data.length < HEADER_SIZE) {
@@ -107,7 +123,8 @@ export function parseByml(data: Uint8Array): BymlDocument {
     strings,
     version,
     visiting: new Set(),
-    depth: 0
+    depth: 0,
+    nodes: 0
   }
 
   return { version, littleEndian, root: readContainerAt(context, rootOffset) }
@@ -229,7 +246,10 @@ function decodeUtf8(bytes: Uint8Array): string {
       continue
     }
 
-    out += String.fromCodePoint(codePoint)
+    // Over-long and out-of-range sequences decode above U+10FFFF, which
+    // String.fromCodePoint rejects with a RangeError — an untyped throw escaping the
+    // codec's declared error surface. Replace them like any other bad sequence.
+    out += codePoint > 0x10ffff ? '\ufffd' : String.fromCodePoint(codePoint)
     i += width
   }
   return out
@@ -259,6 +279,13 @@ function readContainerAt(context: ParseContext, offset: number): BymlNode {
       format: 'byml',
       offset,
       message: `the tree is nested more than ${MAX_DEPTH} deep`
+    })
+  }
+  if (context.nodes > MAX_NODES) {
+    throw new FormatParseError({
+      format: 'byml',
+      offset,
+      message: `the document expands to more than ${MAX_NODES.toLocaleString()} nodes, which is not a document this build will load`
     })
   }
 
@@ -397,6 +424,7 @@ function readHashMap(context: ParseContext, offset: number, count: number): Byml
  */
 function readValue(context: ParseContext, type: number, slotOffset: number): BymlNode {
   const { reader } = context
+  context.nodes++
   reader.seek(slotOffset)
 
   switch (type) {

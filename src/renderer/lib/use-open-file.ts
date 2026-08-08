@@ -45,6 +45,14 @@ export function useOpenFile(): {
   const navigate = useNavigate()
   const setActiveArchive = useWorkspace((state) => state.setActiveArchive)
   const openFolder = useFolder((state) => state.open)
+  /**
+   * Opening a layout takes the main area back to the canvas.
+   *
+   * Without this, clicking a `.bflyt` while a BYML tree was showing opened the tab
+   * but left the tree on screen — indistinguishable from the click doing nothing,
+   * which is the failure mode this app works hard to avoid elsewhere.
+   */
+  const closeByml = useFolder((state) => state.closeByml)
   const openTab = useDocuments((state) => state.openTab)
 
   /**
@@ -94,6 +102,7 @@ export function useOpenFile(): {
         }
 
         if (kind === 'layout') {
+          closeByml()
           const opened = await client.layout.open({ source: { kind: 'file', path } })
           release(
             openTab(
@@ -140,6 +149,7 @@ export function useOpenFile(): {
          */
         const layouts = archive.entries.filter((entry) => entry.kind === 'layout')
         if (layouts.length === 1) {
+          closeByml()
           const only = layouts[0]!
           const opened = await client.layout.open({
             source: { kind: 'archive', archiveId: archive.archiveId, entryKey: only.key }
@@ -164,7 +174,7 @@ export function useOpenFile(): {
         setBusy(false)
       }
     },
-    [navigate, noteRecent, openTab, queryClient, release, setActiveArchive]
+    [closeByml, navigate, noteRecent, openTab, queryClient, release, setActiveArchive]
   )
 
   const openViaDialog = useCallback(() => {

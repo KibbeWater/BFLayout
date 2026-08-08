@@ -300,6 +300,27 @@ describe('duplicatePane', () => {
     expect(document.rootPane!.children[0]).toBe(pane)
   })
 
+  it('keeps copies unique within the 24 bytes the writer stores', () => {
+    /*
+     * Pane names are a fixed 24-byte field and the writer truncates silently, so a
+     * name unique in memory but not in its first 24 characters becomes a duplicate
+     * on disk — two panes one animation would drive at once.
+     */
+    const long = 'ButtonWithAVeryLongName1'
+    expect(long).toHaveLength(24)
+
+    const pane = createPicturePane(long)
+    const document = createLayoutDocument()
+    document.rootPane!.children.push(pane)
+
+    duplicatePane(document, pane.id)!.apply(document)
+    duplicatePane(document, pane.id)!.apply(document)
+
+    const names = document.rootPane!.children.map((child) => child.name.slice(0, 24))
+    expect(new Set(names).size).toBe(names.length)
+    for (const name of names) expect(name.length).toBeLessThanOrEqual(24)
+  })
+
   it('returns null for the root, which has no parent to copy into', () => {
     const document = createLayoutDocument()
     expect(duplicatePane(document, document.rootPane!.id)).toBeNull()

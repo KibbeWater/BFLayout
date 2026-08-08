@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useRef, useState, type ReactNode } from 'react'
 
 import type {
   LayoutDocument,
@@ -265,10 +265,28 @@ function MaterialSection({
   const slots = materialIndicesOf(pane)
   const [slot, setSlot] = useState(0)
 
-  if (slots.length === 0) return null
-
-  const active = slots[Math.min(slot, slots.length - 1)]
+  const active = slots.length > 0 ? slots[Math.min(slot, slots.length - 1)] : undefined
   const material = active ? document.materials[active.index] : undefined
+
+  /*
+   * Every hook runs before the early returns below.
+   *
+   * This memo used to sit lower down, after `if (slots.length === 0) return null`.
+   * Selecting a pic1 (which has a material) and then a pan1 (which has none)
+   * rendered a different number of hooks on the same fiber, which React treats as a
+   * fatal invariant violation — a two-click crash of the whole panel.
+   *
+   * The dependency is `active?.index`, not `active`: `materialIndicesOf` builds a
+   * fresh array of fresh objects on every render, so keying on the object meant the
+   * memo never hit and the tree walk ran every time anyway.
+   */
+  const activeIndex = active?.index
+  const users = useMemo(
+    () => (activeIndex === undefined ? 0 : countMaterialUsers(document, activeIndex)),
+    [document, activeIndex]
+  )
+
+  if (slots.length === 0) return null
 
   if (!material) {
     return (
@@ -288,12 +306,6 @@ function MaterialSection({
       setMaterialSnapshot(active!.index, `Edit ${material.name || 'material'}`, before, after)
     )
   }
-
-  // Another full tree walk; see MaterialsPanel for why this is memoised.
-  const users = useMemo(
-    () => countMaterialUsers(document, active!.index),
-    [document, active]
-  )
 
   return (
     <Group title={`Material · ${material.name || '(unnamed)'}`}>
@@ -759,8 +771,21 @@ function NumberField({
    */
   const [draft, setDraft] = useState<string | null>(null)
 
+  /**
+   * Set while Escape is abandoning an edit, so the blur it triggers does not commit.
+   *
+   * `blur()` dispatches focusout synchronously, before React flushes the
+   * `setDraft(null)` — so the blur handler still saw the draft text in the DOM and
+   * committed exactly the value Escape was meant to discard.
+   */
+  const cancelling = useRef(false)
+
   const commit = (text: string): void => {
     setDraft(null)
+    if (cancelling.current) {
+      cancelling.current = false
+      return
+    }
     // An empty or unparseable field reverts rather than writing a zero.
     const parsed = Number(text)
     if (text.trim() !== '' && Number.isFinite(parsed) && parsed !== value) onChange(parsed)
@@ -784,6 +809,7 @@ function NumberField({
           // Escape abandons the edit and puts the model's value back.
           if (event.key === 'Escape') {
             event.preventDefault()
+            cancelling.current = true
             setDraft(null)
             event.currentTarget.blur()
           }

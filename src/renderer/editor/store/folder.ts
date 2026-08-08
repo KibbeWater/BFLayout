@@ -51,7 +51,8 @@ export const useFolder = create<FolderStore>((set, get) => ({
   tab: 'archive',
   bymlPath: null,
 
-  open: (path) => set({ rootPath: path, path, history: [], tab: 'files' }),
+  // A new folder invalidates any BYML shown from the old one.
+  open: (path) => set({ rootPath: path, path, history: [], tab: 'files', bymlPath: null }),
 
   navigate: (path) =>
     set((state) => ({
@@ -66,7 +67,7 @@ export const useFolder = create<FolderStore>((set, get) => ({
     set({ path: previous, history: history.slice(0, -1) })
   },
 
-  close: () => set({ rootPath: null, path: null, history: [] }),
+  close: () => set({ rootPath: null, path: null, history: [], bymlPath: null }),
 
   setTab: (tab) => set({ tab }),
 

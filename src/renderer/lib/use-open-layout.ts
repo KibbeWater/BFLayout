@@ -5,6 +5,7 @@ import type { LayoutDocument } from '@shared/formats/bflyt'
 import { getClient } from '@renderer/lib/orpc'
 import { reportError } from '@renderer/lib/toast'
 import { useDocuments } from '@renderer/editor/store/document'
+import { useFolder } from '@renderer/editor/store/folder'
 
 /**
  * Opens a layout into a document tab. The main process parses it and hands over
@@ -16,6 +17,8 @@ export function useOpenLayout(): {
 } {
   const [pending, setPending] = useState<string | null>(null)
   const openTab = useDocuments((state) => state.openTab)
+  // A layout takes the main area back to the canvas; see useOpenFile.
+  const closeByml = useFolder((state) => state.closeByml)
 
   const openLayout = useCallback(
     (source: LayoutSource, newTab = false) => {
@@ -25,6 +28,7 @@ export function useOpenLayout(): {
       void (async () => {
         try {
           const result = await getClient().layout.open({ source })
+          closeByml()
           const displaced = openTab({
             documentId: result.documentId,
             displayName: result.displayName,
@@ -49,7 +53,7 @@ export function useOpenLayout(): {
         }
       })()
     },
-    [openTab]
+    [closeByml, openTab]
   )
 
   return { openLayout, pending }

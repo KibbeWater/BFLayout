@@ -59,21 +59,27 @@ export const BymlNodeType = {
 } as const
 
 /**
- * Whether a node type carries its value in the 4-byte slot or points at it.
+ * Whether a node type carries its value in its 4-byte slot or points at it.
  *
- * Everything from 0xc0 up is a container, and the three 64-bit scalars do not fit
- * in four bytes, so those all store an offset instead.
+ * Enumerated rather than expressed as a range. `type >= Array` looks like it means
+ * "container", but 0xc0 is below the inline scalars — Bool, Int, Float, UInt and
+ * Null are all above it — so a range test called every one of them an offset node.
  */
 export function isOffsetNode(type: number): boolean {
-  return (
-    type === BymlNodeType.Binary ||
-    type === BymlNodeType.File ||
-    type === BymlNodeType.HashMap ||
-    type >= BymlNodeType.Array ||
-    type === BymlNodeType.Int64 ||
-    type === BymlNodeType.UInt64 ||
-    type === BymlNodeType.Double
-  )
+  switch (type) {
+    case BymlNodeType.Binary:
+    case BymlNodeType.File:
+    case BymlNodeType.HashMap:
+    case BymlNodeType.Array:
+    case BymlNodeType.Map:
+    case BymlNodeType.StringTable:
+    case BymlNodeType.Int64:
+    case BymlNodeType.UInt64:
+    case BymlNodeType.Double:
+      return true
+    default:
+      return false
+  }
 }
 
 export interface BymlMapEntry {

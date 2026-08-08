@@ -200,6 +200,66 @@ describe('byml malformed input', () => {
     expect(() => parseByml(file)).toThrow(/cycle/)
   })
 
+  it('refuses a shared-subtree blowup instead of exhausting memory', () => {
+    /*
+     * Cycle detection is not enough. `visiting` releases each offset on the way back
+     * out, so a subtree referenced twice is legitimately parsed twice — which makes
+     * the file a DAG, and a few hundred bytes of nested double-references expand
+     * exponentially. This runs in the main process, so before the node budget one
+     * crafted document could take the whole app down.
+     *
+     * Built by hand: 24 levels, each an array holding two references to the level
+     * below, so the flattened tree is on the order of 2^24 nodes.
+     */
+    const levels = 24
+    const header = 16
+    const bytes = new Uint8Array(header + levels * 16 + 16)
+    const view = new DataView(bytes.buffer)
+
+    bytes[0] = 0x59
+    bytes[1] = 0x42
+    view.setUint16(2, 7, true)
+    view.setUint32(4, 0, true) // no hash keys
+    view.setUint32(8, 0, true) // no strings
+
+    // Deepest level first: a two-item array of nulls.
+    const offsetOf = (level: number): number => header + level * 16
+    for (let level = 0; level < levels; level++) {
+      const at = offsetOf(level)
+      // u8 type 0xc0, u24 count 2, then 2 type bytes padded to 4, then 2 slots.
+      bytes[at] = 0xc0
+      bytes[at + 1] = 2
+      const child = level + 1 < levels ? 0xc0 : 0xff
+      bytes[at + 4] = child
+      bytes[at + 5] = child
+      const target = level + 1 < levels ? offsetOf(level + 1) : 0
+      view.setUint32(at + 8, target, true)
+      view.setUint32(at + 12, target, true)
+    }
+    view.setUint32(12, offsetOf(0), true)
+
+    expect(() => parseByml(bytes)).toThrow(/more than .* nodes/)
+  })
+
+  it('replaces an out-of-range UTF-8 sequence rather than throwing an untyped error', () => {
+    // F4 90 80 80 decodes to U+110000, which String.fromCodePoint rejects with a
+    // RangeError — an untyped throw escaping the codec's declared error surface.
+    const root: BymlNode = { kind: 'map', entries: [{ key: 'k', value: { kind: 'string', value: 'x' } }] }
+    const file = buildByml(root)
+    const marker = file.indexOf(0x78) // the 'x' of the string table
+    expect(marker).toBeGreaterThan(0)
+    file[marker] = 0xf4
+    file[marker + 1] = 0x90
+    file[marker + 2] = 0x80
+    file[marker + 3] = 0x80
+
+    const parsed = parseByml(file)
+    const entries = parsed.root?.kind === 'map' ? parsed.root.entries : []
+    const value = entries[0]?.value
+    expect(value?.kind).toBe('string')
+    expect(value?.kind === 'string' ? value.value : '').toContain('\ufffd')
+  })
+
   it('reports an out-of-range string index', () => {
     const file = buildByml({ kind: 'array', items: [{ kind: 'string', value: 'a' }] })
     const view = new DataView(file.buffer)

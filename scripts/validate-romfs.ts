@@ -206,7 +206,8 @@ function checkLayout(name: string, data: Uint8Array, verbose: boolean): void {
       layouts.mismatch++
       note(
         layouts,
-        `${name}: ${at === -1 ? `length ${data.length} vs ${rewritten.length}` : `differs at 0x${at.toString(16)}`}`
+        `${name}: ${at === -1 ? `length ${data.length} vs ${rewritten.length}` : `differs at 0x${at.toString(16)}`}` +
+          ` | ${describeDifference(data, rewritten, at)}`
       )
     }
   } catch (cause) {
@@ -240,7 +241,7 @@ function checkAnimation(name: string, data: Uint8Array, verbose: boolean): void 
       note(
         animations,
         `${name}: ${at === -1 ? `length ${data.length} vs ${rewritten.length}` : `differs at 0x${at.toString(16)}`}` +
-          ` | original ${sectionSizes(data)} vs rewritten ${sectionSizes(rewritten)}`
+          ` | ${describeDifference(data, rewritten, at)}`
       )
     }
   } catch (cause) {
@@ -296,32 +297,82 @@ function wanted(kind: string): boolean {
   return enabled === null || enabled.has(kind)
 }
 
+interface SectionSpan {
+  readonly signature: string
+  readonly start: number
+  readonly size: number
+}
+
 /**
- * The section signatures and sizes of a BFLYT/BFLAN stream, as `sig:size` pairs.
+ * The section chain of a BFLYT/BFLAN stream.
  *
  * Both formats share the same shell: magic[4], a byte-order mark, the header size,
  * the version, the file size, then the section count — so sections begin at the
  * header size and each is a `sig`+`size` block.
  */
-function sectionSizes(data: Uint8Array): string {
+function sectionsOf(data: Uint8Array): SectionSpan[] {
+  const out: SectionSpan[] = []
   try {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
-    // 0xfffe at offset 4 marks little-endian, which every Switch file is.
-    const little = view.getUint16(4, false) === 0xfffe
-    let at = view.getUint16(6, little)
-    const count = view.getUint16(16, little)
-    const parts: string[] = []
+    let at = view.getUint16(6, true)
+    const count = view.getUint16(16, true)
     for (let i = 0; i < count && at + 8 <= data.length; i++) {
       const signature = String.fromCharCode(data[at]!, data[at + 1]!, data[at + 2]!, data[at + 3]!)
-      const size = view.getUint32(at + 4, little)
-      parts.push(`${signature}:${size}`)
+      const size = view.getUint32(at + 4, true)
+      out.push({ signature, start: at, size })
       if (size < 8) break
       at += size
     }
-    return `[${parts.join(' ')}]`
   } catch {
-    return '[unreadable]'
+    // A stream too malformed to walk gets an empty list; the caller says so.
   }
+  return out
+}
+
+/**
+ * Names what actually differs between two encodings of the same file.
+ *
+ * Reporting every section was unusable — one layout has 180 of them, and the whole
+ * list scrolled past on a single line. What matters is the first section whose size
+ * changed, or for an equal-length file, which section contains the differing byte.
+ */
+function describeDifference(original: Uint8Array, rewritten: Uint8Array, at: number): string {
+  const a = sectionsOf(original)
+  const b = sectionsOf(rewritten)
+  if (a.length === 0 || b.length === 0) return 'section chain unreadable'
+
+  if (a.length !== b.length) {
+    return `section count ${a.length} vs ${b.length}`
+  }
+
+  const changed = a
+    .map((section, i) => ({ i, section, other: b[i]! }))
+    .filter(({ section, other }) => section.signature !== other.signature || section.size !== other.size)
+
+  if (changed.length > 0) {
+    const shown = changed
+      .slice(0, 5)
+      .map(({ i, section, other }) => `#${i} ${section.signature} ${section.size}->${other.size}`)
+    const more = changed.length > 5 ? ` (+${changed.length - 5} more)` : ''
+    return `sections differ: ${shown.join(', ')}${more}`
+  }
+
+  // Same sizes, different content: locate the byte.
+  if (at >= 0) {
+    const holder = a.find((section) => at >= section.start && at < section.start + section.size)
+    if (holder) {
+      const hex = (bytes: Uint8Array, from: number): string =>
+        [...bytes.subarray(from, from + 8)].map((b) => b.toString(16).padStart(2, '0')).join(' ')
+      return (
+        `content differs inside ${holder.signature} #${a.indexOf(holder)}` +
+        ` at +0x${(at - holder.start).toString(16)} of ${holder.size}` +
+        ` (original ${hex(original, at)} vs rewritten ${hex(rewritten, at)})`
+      )
+    }
+    return `content differs at 0x${at.toString(16)}, outside every section`
+  }
+
+  return 'no structural difference found'
 }
 
 function describe(cause: unknown): string {

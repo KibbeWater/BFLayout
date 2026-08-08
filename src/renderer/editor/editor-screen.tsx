@@ -161,7 +161,8 @@ export function EditorScreen(): ReactNode {
 function useMenuCommands(): void {
   const panels = usePanels()
   const { openViaDialog, openFolderViaDialog } = useOpenFile()
-  const { save, saveAs, saveAll } = useSave()
+  // `save-all` is handled in AppShell, which is mounted on every route.
+  const { save, saveAs } = useSave()
   const undo = useDocuments((state) => state.undo)
   const redo = useDocuments((state) => state.redo)
 
@@ -182,11 +183,6 @@ function useMenuCommands(): void {
           break
         case 'save-as':
           saveAs()
-          break
-        // Sent by main when the window is closing with unsaved work; it waits for
-        // the tabs to go clean before letting the close through.
-        case 'save-all':
-          void saveAll()
           break
         case 'undo':
           undo()
@@ -218,7 +214,7 @@ function useMenuCommands(): void {
           break
       }
     })
-  }, [panels, openViaDialog, openFolderViaDialog, save, saveAs, saveAll, undo, redo])
+  }, [panels, openViaDialog, openFolderViaDialog, save, saveAs, undo, redo])
 }
 
 const PANEL_KEYS: readonly PanelKey[] = [
@@ -275,7 +271,6 @@ function PanelToggles(): ReactNode {
 function MainView(): ReactNode {
   const bymlPath = useFolder((state) => state.bymlPath)
   const closeByml = useFolder((state) => state.closeByml)
-
   if (!bymlPath) return <LayoutCanvas />
 
   return (

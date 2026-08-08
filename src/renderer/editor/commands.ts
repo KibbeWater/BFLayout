@@ -191,6 +191,12 @@ export function setMaterialSnapshot(
  * animations and groups address panes *by name*; duplicating a name would make an
  * animation drive two panes at once.
  */
+/**
+ * The fixed width of a pane's name field, which the writer truncates to.
+ * See `writeBase` in shared/formats/bflyt/panes.ts.
+ */
+const PANE_NAME_BYTES = 0x18
+
 export function duplicatePane(document: LayoutDocument, paneId: string): Command | null {
   const parent = findPane(document.rootPane, (candidate) =>
     candidate.children.some((child) => child.id === paneId)
@@ -209,13 +215,23 @@ export function duplicatePane(document: LayoutDocument, paneId: string): Command
     // Btn_2 rather than Btn_1_1.
     const stem = base.replace(/_\d+$/, '') || 'Pane'
     for (let i = 1; i < 1000; i++) {
-      const candidate = `${stem}_${i}`
+      const suffix = `_${i}`
+      /*
+       * Trimmed to fit the field the writer will store it in.
+       *
+       * Pane names are a fixed 24 bytes and `fixedString` truncates silently, so a
+       * name that is unique in memory but not in its first 24 characters becomes a
+       * duplicate on disk — two panes one animation would drive at once, which is
+       * the exact hazard this function exists to avoid. Uniqueness therefore has to
+       * be checked on the truncated name.
+       */
+      const candidate = stem.slice(0, PANE_NAME_BYTES - suffix.length) + suffix
       if (!taken.has(candidate)) {
         taken.add(candidate)
         return candidate
       }
     }
-    return `${stem}_${taken.size}`
+    return `${stem.slice(0, PANE_NAME_BYTES - 8)}_${taken.size}`
   }
 
   const clone = (pane: Pane): Pane => {

@@ -113,9 +113,9 @@ function PaneActions(): ReactNode {
   const selected = tab && selectedId ? paneById(tab.document, selectedId) : null
   const isRoot = selected !== null && selected?.id === tab?.document.rootPane?.id
 
-  // A full tree walk. This toolbar re-renders on every store change, which during
-  // a canvas drag means sixty times a second, so the count is memoised on the
-  // revision the store bumps for each mutation.
+  // A full tree walk, memoised on the document revision. As in MaterialsPanel this
+  // helps for re-renders the document did not cause, but not during a drag, which
+  // bumps the revision every frame.
   const document = tab?.document
   const revision = tab?.revision
   const paneCount = useMemo(
@@ -237,25 +237,29 @@ function PaneRow({ pane, depth }: { pane: Pane; depth: number }): ReactNode {
   const toggleCollapsed = useDocuments((state) => state.toggleCollapsed)
   const runCommand = useDocuments((state) => state.runCommand)
 
-  if (!tab) return null
+  const selected = tab?.selectedPaneIds.includes(pane.id) ?? false
 
-  const selected = tab.selectedPaneIds.includes(pane.id)
-  const collapsed = tab.collapsedIds.has(pane.id)
-  const hasChildren = pane.children.length > 0
-  const meta = KIND_META[pane.kind]
-
-  // Hiding a pane is an edit like any other, so it belongs on the undo stack.
   /**
    * Scrolls a pane into view when it becomes selected somewhere else.
    *
    * Selecting on the canvas used to leave the tree wherever it was, so on a deep
    * layout you would select something and see no change here at all.
+   *
+   * Declared above the `!tab` guard: hooks must run unconditionally, and while the
+   * parent currently makes that guard unreachable, relying on that is how the
+   * properties panel ended up with a crash.
    */
   const rowRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
     if (!selected) return
     rowRef.current?.scrollIntoView({ block: 'nearest' })
   }, [selected])
+
+  if (!tab) return null
+
+  const collapsed = tab.collapsedIds.has(pane.id)
+  const hasChildren = pane.children.length > 0
+  const meta = KIND_META[pane.kind]
 
   const toggleVisible = (): void => {
     const before = snapshotPane(pane)
