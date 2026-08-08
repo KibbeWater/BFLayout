@@ -12,9 +12,11 @@ import {
   Plus,
   Puzzle,
   Scissors,
+  Search,
   Square,
   Trash2,
-  Type
+  Type,
+  X
 } from 'lucide-react'
 
 import type { LayoutDocument, Pane, PaneKind } from '@shared/formats/bflyt'
@@ -75,6 +77,7 @@ const KIND_META: Record<PaneKind, { icon: ReactNode; label: string }> = {
 export function HierarchyPanel(): ReactNode {
   const tab = useActiveTab()
   const revealPane = useDocuments((state) => state.revealPane)
+  const [filter, setFilter] = useState('')
 
   // Expand whatever is hiding the selection, so a pane picked on the canvas is
   // actually visible in the tree rather than inside a collapsed branch.
@@ -82,6 +85,40 @@ export function HierarchyPanel(): ReactNode {
   useEffect(() => {
     if (firstSelected) revealPane(firstSelected)
   }, [firstSelected, revealPane])
+
+  /**
+   * Which panes the filter lets through: the matches *and* their ancestors.
+   *
+   * Ancestors are included because a bare list of matches loses the structure that
+   * makes the tree readable — you would see `Txt_Label` with no idea which button it
+   * belongs to. Null means no filter, which is distinct from "nothing matched".
+   *
+   * Memoised on the document revision because it walks the whole tree.
+   */
+  const document = tab?.document
+  const revision = tab?.revision
+  const query = filter.trim().toLowerCase()
+  const { visible, matchCount } = useMemo(() => {
+    if (query === '' || !document?.rootPane) return { visible: null, matchCount: 0 }
+
+    const keep = new Set<string>()
+    let matches = 0
+
+    const walk = (pane: Pane, ancestors: readonly string[]): void => {
+      const hit =
+        pane.name.toLowerCase().includes(query) || pane.kind.toLowerCase().includes(query)
+      if (hit) {
+        matches++
+        keep.add(pane.id)
+        for (const id of ancestors) keep.add(id)
+      }
+      const nested = [...ancestors, pane.id]
+      for (const child of pane.children) walk(child, nested)
+    }
+    walk(document.rootPane, [])
+
+    return { visible: keep, matchCount: matches }
+  }, [document, revision, query])
 
 
   if (!tab) {
@@ -103,8 +140,34 @@ export function HierarchyPanel(): ReactNode {
   return (
     <>
       <PaneActions />
+      <div className="shrink-0 border-b px-2 pb-1.5">
+        <div className="flex items-center gap-1 rounded border bg-input/40 px-1.5">
+          <Search className="size-3 shrink-0 text-muted-foreground/60" />
+          <input
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+            placeholder="Filter panes by name or kind"
+            className="w-full bg-transparent py-1 text-xs outline-none"
+          />
+          {filter ? (
+            <button
+              type="button"
+              onClick={() => setFilter('')}
+              className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent"
+              aria-label="Clear the filter"
+            >
+              <X className="size-3" />
+            </button>
+          ) : null}
+        </div>
+        {visible !== null ? (
+          <p className="mt-1 text-[10px] text-muted-foreground/60">
+            {matchCount} matching {matchCount === 1 ? 'pane' : 'panes'}
+          </p>
+        ) : null}
+      </div>
       <div className="min-h-0 flex-1 overflow-auto py-1">
-        <PaneRow pane={tab.document.rootPane} depth={0} />
+        <PaneRow pane={tab.document.rootPane} depth={0} visible={visible} />
       </div>
     </>
   )
@@ -284,7 +347,16 @@ function uniqueName(document: LayoutDocument, base: string): string {
   return `${base}_${Date.now()}`
 }
 
-function PaneRow({ pane, depth }: { pane: Pane; depth: number }): ReactNode {
+function PaneRow({
+  pane,
+  depth,
+  visible
+}: {
+  pane: Pane
+  depth: number
+  /** Ids the filter lets through, or null when there is no filter. */
+  visible: ReadonlySet<string> | null
+}): ReactNode {
   const tab = useActiveTab()
   const select = useDocuments((state) => state.select)
   const toggleCollapsed = useDocuments((state) => state.toggleCollapsed)
@@ -309,6 +381,8 @@ function PaneRow({ pane, depth }: { pane: Pane; depth: number }): ReactNode {
   }, [selected])
 
   if (!tab) return null
+  // Filtered out entirely: neither a match nor an ancestor of one.
+  if (visible !== null && !visible.has(pane.id)) return null
 
   const collapsed = tab.collapsedIds.has(pane.id)
   const hasChildren = pane.children.length > 0
@@ -390,9 +464,13 @@ function PaneRow({ pane, depth }: { pane: Pane; depth: number }): ReactNode {
         </button>
       </div>
 
-      {!collapsed &&
+      {/*
+        A filter expands the tree: a match three levels down is no use if the
+        branches above it are still shut.
+      */}
+      {(!collapsed || visible !== null) &&
         pane.children.map((child) => (
-          <PaneRow key={child.id} pane={child} depth={depth + 1} />
+          <PaneRow key={child.id} pane={child} depth={depth + 1} visible={visible} />
         ))}
     </>
   )

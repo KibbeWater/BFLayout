@@ -1048,6 +1048,49 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * The hierarchy filter. Finding a pane by name in a several-hundred-pane tree
+   * previously meant scrolling; the tree mode had no filter at all.
+   */
+  const filterResult = (await win.webContents.executeJavaScript(`(async () => {
+    const rows = () => document.querySelectorAll('aside button[title*="\u00b7"]').length
+    const input = [...document.querySelectorAll('input')]
+      .find(i => (i.placeholder || '').startsWith('Filter panes'))
+    if (!input) return { error: 'no pane filter input' }
+
+    const before = rows()
+    const setValue = (value) => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value'
+      ).set
+      setter.call(input, value)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+
+    setValue('Start')
+    await new Promise(r => setTimeout(r, 400))
+    const filtered = rows()
+
+    setValue('')
+    await new Promise(r => setTimeout(r, 400))
+    const restored = rows()
+
+    return { before, filtered, restored }
+  })()`)) as { error?: string; before?: number; filtered?: number; restored?: number }
+
+  if (filterResult.error) {
+    check(false, `pane filter: ${filterResult.error}`)
+  } else {
+    check(
+      (filterResult.filtered ?? 0) > 0 && (filterResult.filtered ?? 0) < (filterResult.before ?? 0),
+      `filtering the hierarchy narrowed it (${filterResult.before} -> ${filterResult.filtered} rows)`
+    )
+    check(
+      filterResult.restored === filterResult.before,
+      `clearing the filter restored every row (${filterResult.restored})`
+    )
+  }
+
+  /*
    * Align acts on a whole selection. Before this, multi-select only enabled dragging:
    * the properties panel edits the first selected pane and nothing acted on the group,
    * so the marquee and shift-click machinery had no payoff.
