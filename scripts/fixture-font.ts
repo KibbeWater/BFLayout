@@ -16,7 +16,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { detectCompression } from '@shared/formats/compression'
-import { decodeBfttf, isBfcpx, isBfttf } from '@shared/formats/font'
+import { decodeBfttf, isBfcpx, isBfttf, parseBfcpx } from '@shared/formats/font'
 import { decompressYaz0 } from '@shared/formats/yaz0'
 import { parseSarc } from '@shared/formats/sarc'
 
@@ -56,9 +56,19 @@ async function main(): Promise<void> {
   const face = smallest(faces)
   const complex = smallest(complexes)
 
-  // Decoded here as well as in the test, so a fixture that cannot possibly pass is rejected
-  // now rather than looking like a decoder regression later.
+  /*
+   * Both halves are parsed here, not just the face.
+   *
+   * A fixture that cannot pass should be rejected now rather than surfacing later as what
+   * looks like a decoder regression — and decoding only the face left exactly that gap, since
+   * the descriptor's chain is what the complex tests read.
+   */
   const decoded = decodeBfttf(face.data)
+  const chain = parseBfcpx(complex.data)
+  if (chain.faces.length === 0) {
+    console.error(`${complex.name} yielded no face names; it cannot satisfy the complex tests`)
+    process.exit(1)
+  }
 
   const out = join(process.cwd(), 'tests', 'fixtures', 'font-vectors.json')
   writeFileSync(
@@ -74,7 +84,9 @@ async function main(): Promise<void> {
   )
 
   console.log(`face:       ${face.name} (${face.data.length} bytes -> ${decoded.kind})`)
-  console.log(`descriptor: ${complex.name} (${complex.data.length} bytes)`)
+  console.log(
+    `descriptor: ${complex.name} (${complex.data.length} bytes) -> ${chain.faces.join(', ')}`
+  )
   console.log(`wrote ${out}`)
   console.log(`${faces.length} faces and ${complexes.length} descriptors were available`)
 }

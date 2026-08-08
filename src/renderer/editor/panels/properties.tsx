@@ -1223,7 +1223,15 @@ function TextArea({
     <textarea
       value={draft ?? value}
       rows={3}
-      onChange={(event) => setDraft(event.target.value)}
+      onChange={(event) => {
+        // The same latch reset the other two draft fields carry, and the one field where
+        // getting it wrong loses a caption rather than a number: an Escape whose blur never
+        // arrived — which is what happens whenever the window is not frontmost, since the
+        // browser suppresses focus events for an unfocused document — left `cancelling` set,
+        // and the next commit discarded the typed text instead of applying it.
+        cancelling.current = false
+        setDraft(event.target.value)
+      }}
       onBlur={(event) => commit(event.target.value)}
       onKeyDown={(event) => {
         // Enter inserts a newline here, so only Escape is special.

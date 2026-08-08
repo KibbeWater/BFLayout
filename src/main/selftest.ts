@@ -1267,6 +1267,108 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * Escape then type then commit, in every draft field.
+   *
+   * Escape latches a "cancelling" flag that the following blur is supposed to consume. When
+   * that blur never arrives — which is any time the window is not frontmost, because the
+   * browser suppresses focus events for an unfocused document — the latch stays set and
+   * silently discards the *next* commit. Worth checking per field rather than once: the fix
+   * initially reached two of the three, and the one it missed was the text pane's content,
+   * where the cost is a lost caption rather than a lost number.
+   */
+  const latch = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    let box = null
+    const walk = (p) => { if (p.kind === 'txt1' && !box) box = p; p.children.forEach(walk) }
+    walk(tab.document.rootPane)
+
+    const setter = (element) =>
+      Object.getOwnPropertyDescriptor(
+        element instanceof HTMLTextAreaElement
+          ? window.HTMLTextAreaElement.prototype
+          : window.HTMLInputElement.prototype,
+        'value'
+      ).set
+
+    const escapeThenType = async (element, text) => {
+      element.focus()
+      // Escape with no blur reaching React, exactly as an unfocused window produces.
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+      await new Promise(r => setTimeout(r, 120))
+      setter(element).call(element, text)
+      element.dispatchEvent(new Event('input', { bubbles: true }))
+      await new Promise(r => setTimeout(r, 120))
+      window.__bfCommitField(element)
+      await new Promise(r => setTimeout(r, 300))
+    }
+
+    const results = {}
+
+    // The name field, a TextField.
+    const pane = tab.document.rootPane.children[0]
+    dev.documents.getState().select([pane.id])
+    await new Promise(r => setTimeout(r, 300))
+    const nameField = [...document.querySelectorAll('aside input')].find(i => i.value === pane.name)
+    if (nameField) {
+      await escapeThenType(nameField, 'LatchName')
+      const live = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+      const find = (p, id) => p.id === id ? p : p.children.reduce((f, c) => f || find(c, id), null)
+      results.textField = find(live.document.rootPane, pane.id).name === 'LatchName'
+    }
+
+    // A number field, on the same pane.
+    const widthLabel = [...document.querySelectorAll('label')]
+      .find(l => l.textContent.trim().startsWith('Width'))
+    const widthInput = widthLabel && widthLabel.querySelector('input')
+    if (widthInput) {
+      await escapeThenType(widthInput, '77')
+      const live = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+      const find = (p, id) => p.id === id ? p : p.children.reduce((f, c) => f || find(c, id), null)
+      results.numberField = find(live.document.rootPane, pane.id).width === 77
+    }
+
+    // The content field, a TextArea, which needs a text pane selected.
+    if (box) {
+      dev.documents.getState().select([box.id])
+      await new Promise(r => setTimeout(r, 350))
+      const area = document.querySelector('aside textarea')
+      if (area) {
+        await escapeThenType(area, 'LatchContent')
+        const live = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+        const find = (p, id) => p.id === id ? p : p.children.reduce((f, c) => f || find(c, id), null)
+        results.textArea = find(live.document.rootPane, box.id).text === 'LatchContent'
+      }
+    }
+
+    // Undo everything this did, so later checks see the document as it was.
+    for (let i = 0; i < 3; i++) {
+      dev.documents.getState().undo()
+      await new Promise(r => setTimeout(r, 120))
+    }
+
+    return { results }
+  })()`)) as { error?: string; results?: Record<string, boolean | undefined> }
+
+  if (latch.error) {
+    check(false, `draft latch: ${latch.error}`)
+  } else {
+    const results = latch.results ?? {}
+    const fields = ['textField', 'numberField', 'textArea'] as const
+    const missing = fields.filter((field) => results[field] === undefined)
+    const broken = fields.filter((field) => results[field] === false)
+    check(
+      broken.length === 0 && missing.length < fields.length,
+      `Escape then typing still commits in every draft field` +
+        (broken.length > 0 ? ` (broken: ${broken.join(', ')})` : '') +
+        (missing.length > 0 ? ` (not on screen: ${missing.join(', ')})` : '')
+    )
+  }
+
+  /*
    * Each tab keeps its own camera.
    *
    * The canvas stays mounted across tab switches, so one camera was shared by every document:
