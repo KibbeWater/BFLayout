@@ -31,6 +31,7 @@ function entry(overrides: Partial<AnimationEntry> = {}): AnimationEntry {
   return {
     name: 'Pic_Thing',
     target: 'pane',
+    userField: null,
     tags: [
       {
         signature: 'FLPA',
@@ -183,6 +184,7 @@ describe('bflan round-trip', () => {
       {
         name: 'Mat_B',
         target: 'material',
+        userField: null,
         tags: [
           {
             signature: 'FLTS',
@@ -244,6 +246,85 @@ describe('bflan round-trip', () => {
 
     const parsed = parseBflan(bytes)
     expect([...writeBflan(parsed.document, parsed.original)]).toEqual([...bytes])
+  })
+})
+
+describe('user-data animations', () => {
+  /**
+   * Target byte 2 — a FLEU tag driving a named user-data field — is the rarest entry
+   * shape in the format: two of 2,187 shipped animations use it, and both re-encoded 24
+   * bytes short because neither the extra offset in the entry header nor the block it
+   * points at was read.
+   *
+   * The writer disagreed with the reader about it too, in a way nothing could catch while
+   * those two files were already failing: it pointed a tag offset *past* the leading word
+   * rather than at it, so its own output read the signature as the leading word and every
+   * field of the tag four bytes late.
+   */
+  const userFieldEntry = (): AnimationEntry => ({
+    name: 'P_MosaicCaptureUse_00',
+    target: 'pane',
+    // The offset word the file carries ahead of the signature, preserved verbatim.
+    tags: [
+      {
+        signature: 'FLEU',
+        leading: 0x2c,
+        components: [
+          {
+            index: 0,
+            target: 0,
+            curve: 'hermite',
+            keyframes: [
+              { frame: 0, value: 7, slope: 9.0546 },
+              { frame: 30, value: 278.64, slope: 9.0546 }
+            ]
+          }
+        ]
+      }
+    ],
+    userField: {
+      name: '__CUS_Float_0',
+      raw: [
+        4, 0, 0, 0, 0x5f, 0x5f, 0x43, 0x55, 0x53, 0x5f, 0x46, 0x6c, 0x6f, 0x61, 0x74, 0x5f,
+        0x30, 0, 0, 0
+      ]
+    }
+  })
+
+  it('round-trips the field name and the tag behind it', () => {
+    const source = createAnimation('MosaicRough')
+    source.info!.entries = [userFieldEntry()]
+
+    const result = roundTrip(source)
+    const entry = result.info!.entries[0]!
+    expect(entry.userField?.name).toBe('__CUS_Float_0')
+    expect(entry.userField?.raw).toEqual(userFieldEntry().userField!.raw)
+    // The tag must come back intact, which is what the offset bug broke.
+    expect(entry.tags[0]!.signature).toBe('FLEU')
+    expect(entry.tags[0]!.leading).toBe(0x2c)
+    expect(entry.tags[0]!.components[0]!.keyframes).toHaveLength(2)
+    expect(entry.tags[0]!.components[0]!.keyframes[1]!.frame).toBe(30)
+  })
+
+  it('re-encodes to identical bytes, so the block is not silently dropped', () => {
+    const source = createAnimation('MosaicRough')
+    source.info!.entries = [userFieldEntry()]
+
+    const once = writeBflan(source)
+    const twice = writeBflan(parseBflan(once).document)
+    expect([...twice]).toEqual([...once])
+  })
+
+  it('writes no extra offset for an ordinary entry', () => {
+    // The extra word belongs to target byte 2 alone; adding it everywhere would shift
+    // every animation in the game by four bytes.
+    const plain = createAnimation('Plain')
+    plain.info!.entries = [entry()]
+    const withField = createAnimation('Plain')
+    withField.info!.entries = [{ ...entry(), tags: userFieldEntry().tags, userField: userFieldEntry().userField }]
+
+    expect(writeBflan(withField).length).toBeGreaterThan(writeBflan(plain).length)
+    expect(roundTrip(plain).info!.entries[0]!.userField).toBeNull()
   })
 })
 
@@ -397,6 +478,7 @@ describe('overrides', () => {
       {
         name,
         target: entryTarget,
+        userField: null,
         tags: [
           {
             signature,

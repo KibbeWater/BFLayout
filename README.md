@@ -43,11 +43,11 @@ romfs dump (Switch, v1.0.4) is parsed and rewritten byte for byte:
 | --- | --- | --- |
 | SARC archives | 567 | 100% |
 | BFLYT layouts | 544 | 99.3% |
-| BFLAN animations | 2187 | 99.9% |
-| BNTX containers | 74,480 textures decoded | 100% |
+| BFLAN animations | 2187 | **100%** |
+| BNTX containers | 74,571 textures decoded | 100% |
 
 See [Validating against real files](#validating-against-real-files) for how to run
-this, and what the remaining 0.9% is.
+this, and what the remaining four layouts are.
 
 ### Keyboard
 
@@ -240,22 +240,39 @@ What is left, and precisely why:
   unmodelled tail" trick that fixed the other sections cannot be applied here
   without writing those blocks twice; `prt1` needs each property's
   `overrideSection`/`panelInfo` extent modelled properly.
-- **Two animations** (`MiniGame_PictQuiz_00_Mosaic{Rough,Normal}`) whose `pai1`
-  entry declares `tagCount = 1` but carries **two** offset slots. The second points
-  at a 20-byte block — a u32 followed by the name `__CUS_Float_0` — that runs to the
-  end of the section, i.e. an animation targeting a user-data custom float. Two
-  samples is not enough to infer the general rule, and guessing it risks the 2185
-  animations that currently round-trip, so this is left modelled-as-unknown rather
-  than approximated. `pnpm diag:bflan` is the tool for picking this up again.
+That is the only remaining gap. The two animations that used to sit here —
+`MiniGame_PictQuiz_00_Mosaic{Rough,Normal}` — now round-trip, and how they were
+resolved is worth recording, because "two samples is not enough to infer the rule"
+was the reason they had been left alone.
+
+The rule was inferred from the *population* instead. `pnpm diag:pai1` counts pai1
+entries by target byte across the whole dump: 6,831 target 0, 1,938 target 1, and
+**exactly 2** target 2 — the same two files. A target-2 entry is a user-data
+animation, its lone tag is `FLEU`, and `FLEU` likewise appears exactly twice. So the
+shape had never round-tripped once, which also meant nothing could break by
+modelling it.
+
+It carries one more offset after its tag-offset array, pointing at a trailing block
+that names the field it drives (`__CUS_Float_0`). Neither the offset nor the block
+was read, which is exactly the 24 bytes both files came back short. The block's
+bytes are replayed verbatim rather than re-encoded from the name: every instance in
+the dump carries the same name, so a single sample cannot distinguish a fixed
+16-byte slot from padding to 4, and replaying is exact under either rule.
+
+Measuring first also turned up a bug that could not have been caught otherwise. The
+writer pointed a target-2 tag offset *past* the leading word rather than at it, so
+its own output could not be re-parsed — the reader took the signature for the
+leading word and read every field of the tag four bytes late. Both affected files
+were already failing, so no test could see it.
 
 All of these still **save** correctly through the normal path, which replays
 original bytes for anything untouched; only a full re-encode from the model
 differs, which is what `validate:romfs` deliberately forces.
 
-**ASTC decodes**, which in this game is most textures: 74,480 surfaces decode
-with zero errors, up from 24,423 before the decoder existed. **BC7 decodes** too,
-verified byte-exact against the GPU (see below); the only format left without a
-decoder is `BC6H`, which two textures use. One `.bntx` is rejected
+**ASTC and BC7 both decode**, which between them is every texture this game ships
+bar two: **74,571 surfaces decode with zero errors**, up from 24,423 before the
+ASTC decoder existed and 74,480 before BC7 joined it. The only format left
+without a decoder is `BC6H`, which two textures use. One `.bntx` is rejected
 outright — `MiiFaceMaskPos.bntx.zs` has a `"Gen "` platform header rather than
 the NX one — which is reported rather than guessed at.
 

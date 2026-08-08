@@ -65,6 +65,20 @@ export interface AnimationEntry {
   name: string
   target: AnimationTargetKind
   tags: AnimationTag[]
+  /**
+   * The user-data field a `FLEU` animation drives, for a target-byte-2 entry.
+   *
+   * Such an entry carries one more offset after its tag-offset array, pointing at a
+   * trailing block that names the field — `__CUS_Float_0` in the two animations that use
+   * it. Neither the offset nor the block was read, so both files re-encoded exactly 24
+   * bytes short.
+   *
+   * The block's bytes are kept verbatim alongside the parsed name. Every instance in the
+   * dump carries the same name, so there is no way to tell a fixed 16-byte slot from
+   * padding to 4 from one sample — and replaying the bytes is exact under either rule,
+   * where guessing wrong would not be.
+   */
+  userField: { name: string; raw: number[] } | null
 }
 
 export interface AnimationInfo {

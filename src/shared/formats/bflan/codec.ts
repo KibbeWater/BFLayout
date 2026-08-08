@@ -139,7 +139,7 @@ export function parseBflan(data: Uint8Array): ParsedAnimation {
         document.tag = readTagInfo(reader, start, start + size, version.major)
         break
       case 'pai1':
-        document.info = readInfo(reader, start)
+        document.info = readInfo(reader, start, start + size)
         break
       default:
         document.unknownSections.push({
@@ -199,7 +199,7 @@ function readTagInfo(
   return { name, order, startFrame, endFrame, childBinding, groups, trailing, userData }
 }
 
-function readInfo(reader: BinaryReader, start: number): AnimationInfo {
+function readInfo(reader: BinaryReader, start: number, end: number): AnimationInfo {
   const frameSize = reader.u16()
   const loop = reader.u8() !== 0
   reader.skip(1)
@@ -223,14 +223,14 @@ function readInfo(reader: BinaryReader, start: number): AnimationInfo {
     for (let i = 0; i < entryCount; i++) offsets.push(reader.u32())
     for (const offset of offsets) {
       reader.seek(start + offset)
-      entries.push(readEntry(reader))
+      entries.push(readEntry(reader, end))
     }
   }
 
   return { frameSize, loop, textures, entries }
 }
 
-function readEntry(reader: BinaryReader): AnimationEntry {
+function readEntry(reader: BinaryReader, end: number): AnimationEntry {
   const start = reader.tell()
   const name = reader.fixedString(ENTRY_NAME_LENGTH)
   const tagCount = reader.u8()
@@ -240,6 +240,13 @@ function readEntry(reader: BinaryReader): AnimationEntry {
   const offsets: number[] = []
   for (let i = 0; i < tagCount; i++) offsets.push(reader.u32())
 
+  /*
+   * Target byte 2 — a user-data animation — puts one more offset here, naming the field
+   * the FLEU tag drives. It was not read at all, so the block it points at was dropped
+   * and both such animations re-encoded 24 bytes short.
+   */
+  const userFieldOffset = targetByte === 2 ? reader.u32() : 0
+
   const target = targetByte === 1 ? 'material' : 'pane'
   const tags: AnimationTag[] = []
   for (const offset of offsets) {
@@ -247,7 +254,40 @@ function readEntry(reader: BinaryReader): AnimationEntry {
     tags.push(readTag(reader, targetByte))
   }
 
-  return { name, target, tags }
+  return {
+    name,
+    target,
+    tags,
+    userField: userFieldOffset === 0 ? null : readUserField(reader, start + userFieldOffset, end)
+  }
+}
+
+/**
+ * The trailing block naming an animated user-data field: a u32 offset to the name,
+ * then the name itself.
+ *
+ * The block's length is derived from the name rather than assumed, and clamped to the
+ * section so a bad offset cannot read past it. Its bytes are kept as well as its name,
+ * because a single sample cannot distinguish a fixed-width slot from padding to 4 and
+ * replaying the bytes is right under either.
+ */
+function readUserField(
+  reader: BinaryReader,
+  at: number,
+  end: number
+): { name: string; raw: number[] } | null {
+  if (at + 4 > end) return null
+  const here = reader.tell()
+  reader.seek(at)
+  const nameOffset = reader.u32()
+  reader.seek(here)
+  const name = at + nameOffset < end ? reader.cstringAt(at + nameOffset) : ''
+  const length = Math.min(end - at, nameOffset + roundUpTo4(name.length + 1))
+  return { name, raw: [...reader.bytesAt(at, length)] }
+}
+
+function roundUpTo4(value: number): number {
+  return (value + 3) & ~3
 }
 
 function readTag(reader: BinaryReader, targetByte: number): AnimationTag {
@@ -453,14 +493,35 @@ function writeEntry(writer: BinaryWriter, entry: AnimationEntry): void {
   writer.u8(targetByte)
   writer.u16(0)
 
-  if (entry.tags.length === 0) return
+  if (entry.tags.length === 0 && entry.userField === null) return
 
   const offsets = entry.tags.map(() => writer.defer('u32'))
+  /*
+   * A user-data entry's extra offset sits after the tag offsets and before the tags,
+   * which is where the file has it.
+   */
+  const userFieldOffset = targetByte === 2 ? writer.defer('u32') : null
+
   for (const [index, tag] of entry.tags.entries()) {
-    // The offset points at the tag signature, which sits after the leading word.
-    const at = writer.length + (tag.leading !== null ? 4 : 0)
-    offsets[index]!.set(at - start)
+    /*
+     * The offset points at the leading word when there is one, not past it.
+     *
+     * This used to skip the four bytes, so the writer's own output could not be
+     * re-parsed: the reader would take the signature itself for the leading word and
+     * read the tag four bytes late. Only target-byte-2 entries have a leading word and
+     * both of them already failed to round-trip, so nothing caught it.
+     */
+    offsets[index]!.set(writer.length - start)
     writeTag(writer, tag)
+  }
+
+  if (userFieldOffset) {
+    if (entry.userField) {
+      userFieldOffset.set(writer.length - start)
+      writer.bytes(new Uint8Array(entry.userField.raw))
+    } else {
+      userFieldOffset.set(0)
+    }
   }
 }
 
