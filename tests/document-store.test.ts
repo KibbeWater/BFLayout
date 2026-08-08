@@ -41,6 +41,7 @@ describe('document store save point', () => {
     useDocuments.setState({ tabs: [], activeId: null })
     useDocuments.getState().openTab({
       documentId: 'doc_1',
+      snapshotKey: 'file\n/tmp/Test.bflyt',
       displayName: 'Test.bflyt',
       source: { kind: 'file', path: '/tmp/Test.bflyt' },
       document
@@ -123,6 +124,61 @@ describe('document store save point', () => {
     expect(tab().unsaved).toBe(false)
   })
 
+  it('does not report clean by undoing back to a save point a mid-flight save invalidated', () => {
+    /*
+     * The save *did* write, so the old save point no longer names what is on disk
+     * either. Leaving savedDepth alone on refusal meant undoing back to it reported the
+     * document clean while the file held the mid-flight state — and closing then
+     * discarded the difference without a word.
+     */
+    const store = useDocuments.getState()
+    store.runCommand(rename(document, paneId, 'A'))
+    const builtFrom = tab().revision
+    store.runCommand(rename(document, paneId, 'B'))
+    store.markSaved('doc_1', builtFrom)
+
+    store.undo()
+    store.undo()
+    expect(tab().history.undo).toHaveLength(0)
+    expect(tab().unsaved).toBe(true)
+  })
+
+  it('opens a recovered document already unsaved, so every guard sees it', () => {
+    // A recovered document exists nowhere on disk. Opening it clean left the close
+    // prompt quiet and made the tab replaceable, so the next layout opened threw it away.
+    const store = useDocuments.getState()
+    store.runCommand(rename(document, paneId, 'A'))
+    store.markSaved('doc_1')
+
+    const displaced = store.openTab(
+      {
+        documentId: 'doc_recovered',
+        snapshotKey: 'file\n/tmp/Recovered.bflyt',
+        displayName: 'Recovered.bflyt',
+        source: { kind: 'file', path: '/tmp/Recovered.bflyt' },
+        document: createLayoutDocument()
+      },
+      { newTab: true, unsaved: true }
+    )
+
+    expect(displaced).toBeNull()
+    const recovered = useDocuments.getState().tabs.find((t) => t.documentId === 'doc_recovered')!
+    expect(recovered.unsaved).toBe(true)
+    expect(recovered.savedDepth).toBe(-1)
+
+    // And it must not be quietly replaced by the next document opened.
+    useDocuments.getState().setActive('doc_recovered')
+    const replaced = useDocuments.getState().openTab({
+      documentId: 'doc_next',
+      snapshotKey: 'file\n/tmp/Next.bflyt',
+      displayName: 'Next.bflyt',
+      source: { kind: 'file', path: '/tmp/Next.bflyt' },
+      document: createLayoutDocument()
+    })
+    expect(replaced).toBeNull()
+    expect(useDocuments.getState().tabs).toHaveLength(3)
+  })
+
   it('refuses to reuse a tab that holds unsaved work', () => {
     // Tab reuse is the third guard reading this flag: an unsaved tab must be kept and
     // the new document opened beside it.
@@ -131,6 +187,7 @@ describe('document store save point', () => {
 
     const displaced = store.openTab({
       documentId: 'doc_2',
+      snapshotKey: 'file\n/tmp/Other.bflyt',
       displayName: 'Other.bflyt',
       source: { kind: 'file', path: '/tmp/Other.bflyt' },
       document: createLayoutDocument()

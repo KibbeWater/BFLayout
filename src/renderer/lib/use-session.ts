@@ -127,6 +127,7 @@ export function useSessionRestore(onDone: () => void): SessionRestore {
           openTab(
             {
               documentId: opened.documentId,
+              snapshotKey: opened.snapshotKey,
               displayName: opened.displayName,
               source: opened.source,
               document: opened.document

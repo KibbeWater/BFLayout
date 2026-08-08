@@ -32,7 +32,12 @@ export function WindowedList<T>({
   /** Extra rows above and below, so a fast scroll does not show blank space. */
   overscan?: number
   className?: string
-  /** Rendered above the rows and outside the scrolled area. */
+  /**
+   * Rendered above the rows, *inside* the scroll container — a sticky filter row is the
+   * intended use, and stickiness needs a scrolling ancestor. Its height is not part of
+   * the spacer arithmetic, so keep it short: `overscan` is what absorbs the offset, and
+   * a header taller than `overscan * rowHeight` would push the first rows out of view.
+   */
   header?: ReactNode
 }): ReactNode {
   const [scrollTop, setScrollTop] = useState(0)
@@ -60,8 +65,19 @@ export function WindowedList<T>({
   // A viewport of zero would render nothing at all before the first measurement, so
   // fall back to a screenful.
   const height = viewport > 0 ? viewport : 600
-  const first = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan)
   const visible = Math.ceil(height / rowHeight) + overscan * 2
+  /*
+   * Clamped against the list length, not just against zero.
+   *
+   * `scrollTop` is last frame's measurement, and the list it described may have been
+   * much longer: scroll deep into 29,000 files, then type a filter that narrows it to
+   * three. Unclamped, `first` lands far past the end, the slice comes back empty — and
+   * because the leading spacer is `first * rowHeight` the content stays tall, so the
+   * browser never clamps `scrollTop` and no scroll event ever arrives to correct it.
+   * The panel just sits there blank. Clamping resolves it in the same render.
+   */
+  const maxFirst = Math.max(0, total - visible)
+  const first = Math.min(maxFirst, Math.max(0, Math.floor(scrollTop / rowHeight) - overscan))
   const last = Math.min(total, first + visible)
 
   return (

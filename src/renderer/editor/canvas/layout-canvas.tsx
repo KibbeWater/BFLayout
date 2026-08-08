@@ -164,6 +164,18 @@ export function LayoutCanvas(): ReactNode {
    */
   /** Where a right-press started, so a right-drag is not mistaken for a right-click. */
   const panStartRef = useRef<{ x: number; y: number } | null>(null)
+  /**
+   * A context menu asked for but not yet opened, because the right button was still
+   * down when the browser asked.
+   *
+   * The two orderings have to be handled separately. On Windows and Linux `contextmenu`
+   * arrives after the button is released, so the distance travelled already says whether
+   * the gesture was a click or a pan. On macOS it arrives on the *press*, when the
+   * distance is always zero — so deciding there would open the menu on every right-drag
+   * pan and then pan underneath it. When the button is still down the request waits here
+   * and `endInteraction` decides.
+   */
+  const pendingMenuRef = useRef<{ x: number; y: number } | null>(null)
   const cycleRef = useRef<{
     x: number
     y: number
@@ -912,7 +924,33 @@ export function LayoutCanvas(): ReactNode {
     draw()
   }
 
+  /**
+   * Opens the pane menu, selecting whatever is under the point first.
+   *
+   * Right-clicking a pane that is not selected selects it, which is what every editor
+   * does and what makes the menu's actions unambiguous.
+   */
+  const openMenuAt = (clientX: number, clientY: number): void => {
+    if (!tab) return
+    const [x, y] = toLayout(clientX, clientY)
+    const renderer = rendererRef.current
+    const hit = renderer
+      ? hitTestAll(renderer.flattened, x, y, { includeHidden: showInvisible })[0]
+      : undefined
+    if (hit && !tab.selectedPaneIds.includes(hit.pane.id)) select([hit.pane.id])
+    setMenuAt({ x: clientX, y: clientY })
+  }
+
   const endInteraction = (event: React.PointerEvent<HTMLDivElement>): void => {
+    // A right-press that asked for a menu and then never moved: now it is a click.
+    const pendingMenu = pendingMenuRef.current
+    const panStart = panStartRef.current
+    pendingMenuRef.current = null
+    panStartRef.current = null
+    if (pendingMenu && travelled(event.clientX, event.clientY, panStart ?? pendingMenu) <= MENU_SLOP) {
+      openMenuAt(pendingMenu.x, pendingMenu.y)
+    }
+
     const finishedMarquee = marqueeRef.current
     if (finishedMarquee && tab) {
       const renderer = rendererRef.current
@@ -1219,23 +1257,22 @@ export function LayoutCanvas(): ReactNode {
            * distance travelled says which gesture it was.
            */
           const start = panStartRef.current
-          panStartRef.current = null
-          if (
-            start &&
-            Math.abs(event.clientX - start.x) + Math.abs(event.clientY - start.y) > 3
-          ) {
+          if (start && travelled(event.clientX, event.clientY, start) > MENU_SLOP) {
+            // Already a drag by the time we were asked: this is a pan, not a menu.
+            panStartRef.current = null
+            pendingMenuRef.current = null
             return
           }
 
-          const [x, y] = toLayout(event.clientX, event.clientY)
-          const renderer = rendererRef.current
-          const hit = renderer
-            ? hitTestAll(renderer.flattened, x, y, { includeHidden: showInvisible })[0]
-            : undefined
-          // Right-clicking a pane that is not selected selects it first, which is what
-          // every editor does and what makes the menu's actions unambiguous.
-          if (hit && !tab.selectedPaneIds.includes(hit.pane.id)) select([hit.pane.id])
-          setMenuAt({ x: event.clientX, y: event.clientY })
+          // Button still down means the browser fired on the press (macOS), and the
+          // gesture is not decided yet. Hand it to endInteraction.
+          if (start && panRef.current) {
+            pendingMenuRef.current = { x: event.clientX, y: event.clientY }
+            return
+          }
+
+          panStartRef.current = null
+          openMenuAt(event.clientX, event.clientY)
         }}
       >
         <canvas ref={attachCanvas} className="absolute inset-0 size-full" />
@@ -1594,8 +1631,23 @@ function CanvasMenu({
   onMove: (move: PaneMove) => void
   onSelectParent: () => void
 }): ReactNode {
+  const root = useRef<HTMLDivElement | null>(null)
+
   useEffect(() => {
-    const dismiss = (): void => onClose()
+    /*
+     * Pressing inside the menu must not dismiss it.
+     *
+     * The listener is capture-phase at `window`, so it runs before any handler the menu
+     * itself installs — the `onPointerDown` stopPropagation below is bubble-phase and
+     * never gets a say. That meant pressing an item unmounted the menu before the
+     * pointer came back up, so `click` never fired and every item did nothing but close
+     * the menu. Only a press genuinely outside dismisses.
+     */
+    const dismiss = (event: Event): void => {
+      const node = root.current
+      if (node && event.target instanceof Node && node.contains(event.target)) return
+      onClose()
+    }
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') onClose()
     }
@@ -1646,6 +1698,7 @@ function CanvasMenu({
   return (
     <div
       role="menu"
+      ref={root}
       style={{ left: Math.max(0, left), top: Math.max(0, top), width: MENU_WIDTH }}
       className="absolute z-20 overflow-hidden rounded-md border bg-popover py-1 shadow-lg"
       // The menu is inside the canvas container, whose own handlers would otherwise
@@ -1673,6 +1726,13 @@ function CanvasMenu({
       ))}
     </div>
   )
+}
+
+/** Movement below this stays a click rather than becoming a pan, in CSS pixels. */
+const MENU_SLOP = 3
+
+function travelled(x: number, y: number, from: { x: number; y: number }): number {
+  return Math.abs(x - from.x) + Math.abs(y - from.y)
 }
 
 const MENU_WIDTH = 190

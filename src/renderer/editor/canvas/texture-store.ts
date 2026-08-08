@@ -167,44 +167,59 @@ export class TextureStore {
     return this.entries.get(name)?.size ?? undefined
   }
 
+  /**
+   * The still-live cache for `source`, or null if it has been evicted since.
+   *
+   * A late arrival is *resolved against the source it was requested for*, not against
+   * whatever is current. Since each source keeps its own map, that is both safe and
+   * necessary: discarding late arrivals left the entry stuck on `pending` in a map that
+   * outlived the switch, so coming back to that tab found a pending entry, returned
+   * null, and never refetched — the pane stayed untextured until the whole cache aged
+   * out. Any tab switch during loading did it.
+   */
+  private liveEntriesFor(source: LayoutSource): Map<string, Entry> | null {
+    return this.bySource.get(sourceKey(source)) ?? null
+  }
+
   private async fetch(name: string): Promise<void> {
     const source = this.source
     if (!source) return
 
     try {
       const decoded = await getClient().textures.get({ source, name })
-      /*
-       * Two things can have happened across the await, and both used to be
-       * mishandled in one direction or the other:
-       *
-       *   - the source changed, so a late arrival for the previous layout must not
-       *     be uploaded against the current one;
-       *   - the store was disposed, in which case the GL context is gone. Uploading
-       *     into it and then calling `onChanged` meant WebGL calls against a dead
-       *     context and a state update into an unmounted component.
-       */
-      if (this.disposed || !sameSource(this.source, source)) return
+      // Disposed means the GL context is gone: uploading into it and then calling
+      // `onChanged` is WebGL against a dead context plus a state update into an
+      // unmounted component.
+      if (this.disposed) return
 
       const rgba = new Uint8Array(await decoded.rgba.arrayBuffer())
-      if (this.disposed || !sameSource(this.source, source)) return
+      if (this.disposed) return
+
+      const entries = this.liveEntriesFor(source)
+      // Evicted while in flight. Nothing to store it in, and nothing wants it.
+      if (!entries) return
 
       const texture = this.upload(rgba, decoded.width, decoded.height)
-      this.entries.set(name, {
+      entries.set(name, {
         state: 'ready',
         texture,
         size: [decoded.width, decoded.height],
         detail: null
       })
     } catch (cause) {
-      if (this.disposed || !sameSource(this.source, source)) return
-      this.entries.set(name, {
+      if (this.disposed) return
+      const entries = this.liveEntriesFor(source)
+      if (!entries) return
+      entries.set(name, {
         state: 'missing',
         texture: null,
         size: null,
         detail: cause instanceof Error ? cause.message : String(cause)
       })
     }
-    this.onChanged()
+    // Only the visible source's arrivals change the picture; a redraw for a background
+    // tab would be wasted work.
+    if (sameSource(this.source, source)) this.onChanged()
   }
 
   private upload(

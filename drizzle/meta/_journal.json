@@ -15,6 +15,20 @@
       "when": 1786186890703,
       "tag": "0001_remarkable_tag",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786189791133,
+      "tag": "0002_tidy_madelyne_pryor",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1786189804381,
+      "tag": "0003_square_nemesis",
+      "breakpoints": true
     }
   ]
 }

@@ -133,6 +133,29 @@ export const layoutSourceSchema = z.union([
 
 export type LayoutSource = z.infer<typeof layoutSourceSchema>
 
+export const durableLayoutSourceSchema = z.union([
+  z.object({ kind: z.literal('file'), path: z.string().min(1) }),
+  z.object({
+    kind: z.literal('archive'),
+    archivePath: z.string().min(1),
+    entryKey: z.string().min(1)
+  })
+])
+
+/**
+ * One offerable recovery snapshot. `sourceModifiedAt` is null when the file it came
+ * from is no longer where the key says it is.
+ */
+export const snapshotSummarySchema = z.object({
+  key: z.string(),
+  displayName: z.string(),
+  source: durableLayoutSourceSchema,
+  updatedAt: z.number().int(),
+  sourceModifiedAt: z.number().int().nullable()
+})
+
+export type SnapshotSummary = z.infer<typeof snapshotSummarySchema>
+
 /**
  * The layout document is passed through by type rather than validated field by
  * field. Deep-validating a tree with thousands of nodes on every open and save
@@ -147,7 +170,13 @@ export const openLayoutResultSchema = z.object({
   documentId: z.string(),
   displayName: z.string(),
   source: layoutSourceSchema,
-  document: layoutDocumentSchema
+  document: layoutDocumentSchema,
+  /**
+   * The durable identity of this document, for keying crash-recovery snapshots.
+   * Handed out at open time so a tab can write and discard its own snapshot without
+   * a round trip, and — critically — after its main-process session is gone.
+   */
+  snapshotKey: z.string()
 })
 
 export type OpenLayoutResult = z.infer<typeof openLayoutResultSchema>

@@ -23,6 +23,13 @@ import {
  */
 export interface DocumentTab {
   readonly documentId: string
+  /**
+   * The durable identity of the file behind this tab, for keying recovery snapshots.
+   *
+   * Carried on the tab rather than looked up, because a snapshot has to be discardable
+   * *after* the tab closes and its main-process session is gone.
+   */
+  readonly snapshotKey: string
   displayName: string
   source: LayoutSource
   document: LayoutDocument
@@ -64,7 +71,13 @@ interface DocumentStore {
       DocumentTab,
       'selectedPaneIds' | 'collapsedIds' | 'unsaved' | 'savedDepth' | 'revision' | 'history'
     >,
-    options?: { newTab?: boolean }
+    /**
+     * `unsaved` opens the tab already dirty, which is what a recovered document is:
+     * its contents exist nowhere on disk. Without it the tab claimed to match a file
+     * it had never been written to, so the close prompt stayed quiet and — worse — the
+     * tab counted as replaceable, and opening the next layout silently discarded it.
+     */
+    options?: { newTab?: boolean; unsaved?: boolean }
   ) => string | null
   closeTab: (documentId: string) => void
   setActive: (documentId: string) => void
@@ -110,12 +123,14 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
       return null
     }
 
+    const unsaved = options?.unsaved ?? false
     const fresh: DocumentTab = {
       ...tab,
       selectedPaneIds: [],
       collapsedIds: new Set<string>(),
-      unsaved: false,
-      savedDepth: 0,
+      unsaved,
+      // No reachable save point for a document that has never been written.
+      savedDepth: unsaved ? -1 : 0,
       revision: 0,
       history: EMPTY_UNDO
     }
@@ -286,8 +301,16 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
     set((state) => ({
       tabs: state.tabs.map((tab) => {
         if (tab.documentId !== (documentId ?? state.activeId)) return tab
-        // Edited since the save was built: those changes are not on disk.
-        if (atRevision !== undefined && tab.revision !== atRevision) return tab
+        /*
+         * Edited since the save was built, so those changes are not on disk — but the
+         * save *did* write, so the old save point no longer names what the file holds
+         * either. Leaving `savedDepth` alone meant undoing back to it reported the
+         * document clean while disk held the mid-flight state, and closing then
+         * discarded the difference in silence.
+         */
+        if (atRevision !== undefined && tab.revision !== atRevision) {
+          return { ...tab, savedDepth: -1 }
+        }
         return { ...tab, unsaved: false, savedDepth: tab.history.undo.length }
       })
     })),

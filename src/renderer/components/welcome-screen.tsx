@@ -87,19 +87,38 @@ function RecoveryCard(): ReactNode {
     void (async () => {
       const client = getClient()
       let recovered = 0
+      const failed: string[] = []
       try {
         for (const summary of snapshots) {
-          const record = await client.snapshot.get({ documentId: summary.documentId })
-          // A snapshot whose row will not parse is skipped rather than failing the lot.
-          if (!record) continue
+          /*
+           * Restoring goes through main so the recovered document gets a real session
+           * and the original section bytes behind it. Pushing the stored document
+           * straight into a tab used to look like it worked right up until the first
+           * save, which failed with "layout document not found" — the only thing the
+           * feature is for.
+           */
+          let opened: Awaited<ReturnType<typeof client.snapshot.restore>>
+          try {
+            opened = await client.snapshot.restore({ key: summary.key })
+          } catch {
+            // One unreadable row, or a file that has since moved, must not take the
+            // rest of the recovery down with it. Named in the summary below instead.
+            failed.push(summary.displayName)
+            continue
+          }
+
           openTab(
             {
-              documentId: record.documentId,
-              displayName: record.displayName,
-              source: record.source,
-              document: record.document
+              documentId: opened.documentId,
+              snapshotKey: opened.snapshotKey,
+              displayName: opened.displayName,
+              source: opened.source,
+              document: opened.document
             },
-            { newTab: true }
+            // Unsaved, because these edits exist nowhere on disk. Anything less and
+            // the close prompt stays quiet and the tab counts as replaceable, so the
+            // next layout opened would quietly throw the recovered work away.
+            { newTab: true, unsaved: true }
           )
           recovered++
         }
@@ -107,13 +126,17 @@ function RecoveryCard(): ReactNode {
         if (recovered === 0) {
           reportInfo(
             'Nothing to recover',
-            'The snapshots could not be read back, so they have been discarded.'
+            failed.length > 0
+              ? `Could not reopen ${failed.join(', ')} — the files may have moved. The snapshots have been kept, so you can try again.`
+              : 'The snapshots could not be read back, so they have been discarded.'
           )
-          await client.snapshot.clear()
+          if (failed.length === 0) await client.snapshot.clear()
         } else {
+          const skipped =
+            failed.length > 0 ? ` ${failed.length} could not be reopened: ${failed.join(', ')}.` : ''
           reportSuccess(
             'Recovered',
-            `${recovered} unsaved layout${recovered === 1 ? '' : 's'} restored. They are still unsaved — save to write them to disk.`
+            `${recovered} unsaved layout${recovered === 1 ? '' : 's'} restored, still unsaved — save to write them to disk.${skipped}`
           )
           await navigate({ to: '/editor' })
         }
@@ -138,6 +161,16 @@ function RecoveryCard(): ReactNode {
   }
 
   const newest = Math.max(...snapshots.map((entry) => entry.updatedAt))
+  /*
+   * A file written since its snapshot was taken is the one case where recovering could
+   * itself destroy work — someone else's edit, or an edit from a later session, would be
+   * overwritten by older in-memory state. The user is the only one who can judge that,
+   * so it is said out loud rather than resolved silently. A one-second grace absorbs the
+   * ordinary case where the snapshot and the save happened in the same moment.
+   */
+  const stale = snapshots.filter(
+    (entry) => entry.sourceModifiedAt !== null && entry.sourceModifiedAt > entry.updatedAt + 1000
+  )
 
   return (
     <div className="flex w-full max-w-xl items-center gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3">
@@ -149,6 +182,13 @@ function RecoveryCard(): ReactNode {
           {snapshots.length} layout{snapshots.length === 1 ? '' : 's'}, last edited{' '}
           {new Date(newest).toLocaleString()}
         </span>
+        {stale.length > 0 ? (
+          <span className="mt-0.5 block text-amber-600 dark:text-amber-500">
+            {stale.length === 1
+              ? `${stale[0]!.displayName} has been written to since — recovering would replace what is there now.`
+              : `${stale.length} of these files have been written to since — recovering would replace what is there now.`}
+          </span>
+        ) : null}
       </p>
       <button
         type="button"
@@ -162,7 +202,8 @@ function RecoveryCard(): ReactNode {
       <button
         type="button"
         onClick={discard}
-        className="rounded p-1 hover:bg-accent"
+        disabled={busy}
+        className="rounded p-1 hover:bg-accent disabled:opacity-50"
         aria-label="Discard the recovered work"
         title="Discard the recovered work"
       >

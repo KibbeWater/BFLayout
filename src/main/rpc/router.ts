@@ -1,7 +1,7 @@
 import { implement } from '@orpc/server'
 import { Effect } from 'effect'
 
-import { contract } from '@shared/contract'
+import { contract, parseSnapshotKey } from '@shared/contract'
 import { AnimationService } from '@main/services/animation'
 import { ArchiveService } from '@main/services/archive'
 import { DialogService } from '@main/services/dialog'
@@ -14,6 +14,7 @@ import { SettingsService } from '@main/services/settings'
 import { TextureService } from '@main/services/textures'
 import { WindowStateService } from '@main/services/window-state'
 import { WorkspaceService } from '@main/services/workspace'
+import { NotFoundError } from '@main/errors'
 import { setUnsavedCount } from '@main/unsaved'
 import { run } from './run'
 
@@ -219,12 +220,33 @@ const snapshotRoutes = {
 
   list: os.snapshot.list.handler(() => run(Effect.flatMap(SnapshotService, (s) => s.list()))),
 
-  get: os.snapshot.get.handler(({ input }) =>
-    run(Effect.flatMap(SnapshotService, (s) => s.get(input.documentId)))
+  /**
+   * Reopens the file a snapshot names and swaps the recovered document in, so the tab
+   * the renderer gets back is indistinguishable from a normal open — session, preserved
+   * bytes and all — and can therefore be saved.
+   *
+   * A row whose document will not parse, or whose key this build cannot read, is
+   * reported as gone rather than half-restored: the caller discards it and says so.
+   */
+  restore: os.snapshot.restore.handler(({ input }) =>
+    run(
+      Effect.gen(function* () {
+        const snapshotService = yield* SnapshotService
+        const record = yield* snapshotService.get(input.key)
+        const source = parseSnapshotKey(input.key)
+        if (!record || !source) {
+          return yield* Effect.fail(new NotFoundError({ kind: 'recovery snapshot', id: input.key }))
+        }
+
+        const layouts = yield* LayoutService
+        const opened = yield* layouts.restore(source, record.document)
+        return { ...opened, updatedAt: record.updatedAt }
+      })
+    )
   ),
 
   remove: os.snapshot.remove.handler(async ({ input }) => {
-    await run(Effect.flatMap(SnapshotService, (s) => s.remove(input.documentId)))
+    await run(Effect.flatMap(SnapshotService, (s) => s.remove(input.key)))
     return ok
   }),
 

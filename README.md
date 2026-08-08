@@ -253,8 +253,9 @@ original bytes for anything untouched; only a full re-encode from the model
 differs, which is what `validate:romfs` deliberately forces.
 
 **ASTC decodes**, which in this game is most textures: 74,480 surfaces decode
-with zero errors, up from 24,423 before the decoder existed. The only formats
-left without one are `BC7` (91 textures) and `BC6H` (2). One `.bntx` is rejected
+with zero errors, up from 24,423 before the decoder existed. **BC7 decodes** too,
+verified byte-exact against the GPU (see below); the only format left without a
+decoder is `BC6H`, which two textures use. One `.bntx` is rejected
 outright — `MiiFaceMaskPos.bntx.zs` has a `"Gen "` platform header rather than
 the NX one — which is reported rather than guessed at.
 
@@ -288,10 +289,29 @@ differently:
 - **A crash or a kill** is covered by recovery snapshots. On a debounced timer, any tab
   holding unsaved edits has its *document* written to sqlite — the document's own JSON,
   not encoded layout bytes, so the editing state comes back exactly, including a document
-  the writer would currently refuse to encode. The welcome screen offers them back rather
-  than restoring automatically: silently reinstating an in-memory copy over a file
-  someone changed elsewhere is its own way to lose work. A successful save discards the
-  snapshot, since the file on disk is then the better copy.
+  the writer would currently refuse to encode.
+
+  Rows are keyed by the file's **path** (plus the entry name, for a layout inside an
+  archive), not by its document id. That distinction is the whole feature: document ids
+  are minted per open and restart from `1` every launch, so keying persistent rows by them
+  meant a crashed file's snapshot could be silently claimed — and then overwritten — by an
+  unrelated file on the next run, and that a save could never find the row it was meant to
+  discard.
+
+  Restoring goes through a real `layout.open` on the file the key names, and only then
+  swaps the recovered document in. Pushing the stored document straight into a tab looks
+  like it works right up to the first save, which fails with *layout document not found*:
+  without a main-process session there are no preserved section bytes to re-encode
+  against, so the one thing recovery exists to do — getting the work back onto disk — is
+  the one thing that does not happen.
+
+  The welcome screen offers snapshots back rather than restoring automatically, and says
+  so when the file has been written to since the snapshot was taken: silently reinstating
+  an in-memory copy over a file someone changed elsewhere is its own way to lose work.
+  Recovered tabs open **unsaved**, because their contents exist nowhere on disk — anything
+  else and the close prompt stays quiet and the tab counts as replaceable, so opening the
+  next layout throws the recovered work away. A successful save discards the snapshot,
+  since the file on disk is then the better copy.
 - **A save that half-succeeded** is why `markSaved` takes the revision the bytes were
   built from. Serializing and writing is asynchronous, so an edit landing in between is
   not on disk; clearing the flag anyway made it look saved and the tab-close guard then

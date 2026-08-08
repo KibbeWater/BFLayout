@@ -1,8 +1,14 @@
+import { statSync } from 'node:fs'
 import { desc, eq } from 'drizzle-orm'
 import { Effect } from 'effect'
 
 import type { LayoutDocument } from '@shared/formats/bflyt'
-import type { LayoutSource } from '@shared/contract'
+import {
+  parseSnapshotKey,
+  snapshotKeyPath,
+  type DurableLayoutSource,
+  type SnapshotSummary
+} from '@shared/contract'
 import { Db, dbTry } from '@main/db/client'
 import { snapshots } from '@main/db/schema'
 import type { DbError } from '@main/errors'
@@ -19,23 +25,15 @@ import type { DbError } from '@main/errors'
  * refuse to encode — and re-encoding on a timer would also pay the whole serialisation
  * cost every few seconds.
  *
- * Keyed by document id, so a file being edited replaces its own snapshot rather than
- * accumulating them. Writes are best-effort by design: a failure here must never
- * interrupt editing, so callers log and carry on.
+ * Keyed by the *durable* identity of the file rather than by document id; see
+ * `snapshot-key.ts` for why that distinction is the whole design. Writes are
+ * best-effort: a failure here must never interrupt editing, so callers log and carry on.
  */
 
 export interface SnapshotRecord {
-  readonly documentId: string
+  readonly key: string
   readonly displayName: string
-  readonly source: LayoutSource
   readonly document: LayoutDocument
-  readonly updatedAt: number
-}
-
-export interface SnapshotSummary {
-  readonly documentId: string
-  readonly displayName: string
-  readonly source: LayoutSource
   readonly updatedAt: number
 }
 
@@ -44,16 +42,14 @@ export class SnapshotService extends Effect.Service<SnapshotService>()('Snapshot
     const { db } = yield* Db
 
     const put = (record: {
-      documentId: string
+      key: string
       displayName: string
-      source: LayoutSource
       document: LayoutDocument
     }): Effect.Effect<void, DbError> =>
       dbTry('write a recovery snapshot', () => {
         const row = {
-          documentId: record.documentId,
+          key: record.key,
           displayName: record.displayName,
-          source: JSON.stringify(record.source),
           document: JSON.stringify(record.document),
           updatedAt: Date.now()
         }
@@ -61,10 +57,9 @@ export class SnapshotService extends Effect.Service<SnapshotService>()('Snapshot
         db.insert(snapshots)
           .values(row)
           .onConflictDoUpdate({
-            target: snapshots.documentId,
+            target: snapshots.key,
             set: {
               displayName: row.displayName,
-              source: row.source,
               document: row.document,
               updatedAt: row.updatedAt
             }
@@ -74,15 +69,19 @@ export class SnapshotService extends Effect.Service<SnapshotService>()('Snapshot
 
     /**
      * Summaries only — the documents themselves are megabytes, and the welcome screen
-     * needs a name and a time to offer them.
+     * needs a name, a time and somewhere to point.
+     *
+     * Each row is stat'd so the offer can say whether the file has moved on since the
+     * snapshot was taken. Restoring hours-old edits over a file someone has since
+     * changed elsewhere is the one way this feature could itself destroy work, and the
+     * user is the only one who can judge it — so the answer is surfaced, not guessed at.
      */
     const list = (): Effect.Effect<SnapshotSummary[], DbError> =>
       dbTry('list recovery snapshots', () => {
         const rows = db
           .select({
-            documentId: snapshots.documentId,
+            key: snapshots.key,
             displayName: snapshots.displayName,
-            source: snapshots.source,
             updatedAt: snapshots.updatedAt
           })
           .from(snapshots)
@@ -90,31 +89,25 @@ export class SnapshotService extends Effect.Service<SnapshotService>()('Snapshot
           .all()
 
         return rows.flatMap((row) => {
-          const source = parseSource(row.source)
-          // A row whose source will not parse cannot be reopened, so it is not offered.
+          const source = parseSnapshotKey(row.key)
+          // A key this build cannot read names nothing reopenable, so it is not offered.
           if (!source) return []
           return [
             {
-              documentId: row.documentId,
+              key: row.key,
               displayName: row.displayName,
               source,
-              updatedAt: row.updatedAt
+              updatedAt: row.updatedAt,
+              sourceModifiedAt: modifiedAt(source)
             }
           ]
         })
       })
 
-    const get = (documentId: string): Effect.Effect<SnapshotRecord | null, DbError> =>
+    const get = (key: string): Effect.Effect<SnapshotRecord | null, DbError> =>
       dbTry('read a recovery snapshot', () => {
-        const row = db
-          .select()
-          .from(snapshots)
-          .where(eq(snapshots.documentId, documentId))
-          .get()
+        const row = db.select().from(snapshots).where(eq(snapshots.key, key)).get()
         if (!row) return null
-
-        const source = parseSource(row.source)
-        if (!source) return null
 
         let document: LayoutDocument
         try {
@@ -125,17 +118,16 @@ export class SnapshotService extends Effect.Service<SnapshotService>()('Snapshot
         }
 
         return {
-          documentId: row.documentId,
+          key: row.key,
           displayName: row.displayName,
-          source,
           document,
           updatedAt: row.updatedAt
         }
       })
 
-    const remove = (documentId: string): Effect.Effect<void, DbError> =>
+    const remove = (key: string): Effect.Effect<void, DbError> =>
       dbTry('discard a recovery snapshot', () => {
-        db.delete(snapshots).where(eq(snapshots.documentId, documentId)).run()
+        db.delete(snapshots).where(eq(snapshots.key, key)).run()
       })
 
     const clear = (): Effect.Effect<void, DbError> =>
@@ -147,10 +139,14 @@ export class SnapshotService extends Effect.Service<SnapshotService>()('Snapshot
   })
 }) {}
 
-function parseSource(raw: string): LayoutSource | null {
+/**
+ * Last-written time of the file a snapshot came from, or null if it is not there any
+ * more. A missing file is not an error here — a snapshot for something that has since
+ * been moved or deleted is still worth offering, it just cannot be reopened.
+ */
+function modifiedAt(source: DurableLayoutSource): number | null {
   try {
-    const parsed = JSON.parse(raw) as LayoutSource
-    return parsed && typeof parsed === 'object' && 'kind' in parsed ? parsed : null
+    return Math.round(statSync(snapshotKeyPath(source)).mtimeMs)
   } catch {
     return null
   }

@@ -31,6 +31,7 @@ export function useOpenLayout(): {
           closeByml()
           const displaced = openTab({
             documentId: result.documentId,
+            snapshotKey: result.snapshotKey,
             displayName: result.displayName,
             source: result.source,
             // The contract passes the document through by type, so this cast

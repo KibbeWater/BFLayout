@@ -45,14 +45,19 @@ export const workspaces = sqliteTable('workspaces', {
  * point is to restore the editing state exactly, including edits the writer would
  * refuse to encode.
  *
- * Keyed by document id, so reopening the same file replaces its snapshot rather than
- * accumulating them. Cleared on a successful save, and on an explicit discard.
+ * Keyed by the *durable* identity of the file — its path, plus the entry name for a
+ * layout inside an archive — and not by the document id. Document ids are minted per
+ * open and restart from the beginning every launch, so keying persistent rows by them
+ * meant one file's snapshot could be claimed by another file on the next run, and that
+ * a save could never find the row it was supposed to discard. See `snapshot-key.ts`.
+ *
+ * Replaced on re-edit, discarded on a successful save, and cleared on an explicit
+ * discard.
  */
+
 export const snapshots = sqliteTable('snapshots', {
-  documentId: text('document_id').primaryKey(),
+  key: text('key').primaryKey(),
   displayName: text('display_name').notNull(),
-  /** The LayoutSource as JSON, so a recovered document knows where it came from. */
-  source: text('source').notNull(),
   document: text('document').notNull(),
   updatedAt: integer('updated_at').notNull()
 })

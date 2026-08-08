@@ -410,6 +410,7 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     })
     dev.documents.getState().openTab({
       documentId: opened.documentId,
+      snapshotKey: opened.snapshotKey,
       displayName: opened.displayName,
       source: opened.source,
       document: opened.document
@@ -468,6 +469,7 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     dev.workspace.getState().setActiveArchive(arch.archiveId)
     dev.documents.getState().openTab({
       documentId: opened.documentId,
+      snapshotKey: opened.snapshotKey,
       displayName: opened.displayName,
       source: opened.source,
       document: opened.document
@@ -1556,8 +1558,29 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     fire('pointerup', cx + 40, cy, 2)
     await new Promise(r => setTimeout(r, 150))
 
-    // A right *click* must open it.
+    /*
+     * A right *click* must open it — in both of the orderings browsers use. macOS
+     * Chromium fires contextmenu on the press, Windows and Linux fire it after the
+     * release, so the menu has to survive being asked at either moment. First: the
+     * macOS ordering, contextmenu while the button is still down.
+     */
     fire('pointerdown', cx, cy, 2)
+    container.dispatchEvent(new MouseEvent('contextmenu', {
+      clientX: cx, clientY: cy, bubbles: true, cancelable: true
+    }))
+    await new Promise(r => setTimeout(r, 120))
+    const openedOnPress = !!menu()
+    fire('pointerup', cx, cy, 2)
+    await new Promise(r => setTimeout(r, 250))
+    const openedAfterPressOrdering = !!menu()
+    if (openedAfterPressOrdering) {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await new Promise(r => setTimeout(r, 150))
+    }
+
+    // Then the Windows ordering: released first, contextmenu after.
+    fire('pointerdown', cx, cy, 2)
+    fire('pointerup', cx, cy, 2)
     container.dispatchEvent(new MouseEvent('contextmenu', {
       clientX: cx, clientY: cy, bubbles: true, cancelable: true
     }))
@@ -1576,7 +1599,24 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       ? [...menu().querySelectorAll('[role="menuitem"]')]
           .find(b => b.textContent.includes('Duplicate'))
       : null
-    if (dup) dup.click()
+    /*
+     * Pressed the way a mouse presses it: pointerdown, then click.
+     *
+     * A bare dup.click() passes even when the menu is unusable in practice. The
+     * dismiss listener is capture-phase at window, so it sees a real pointerdown on the
+     * item first — and used to close the menu before the button could ever be clicked,
+     * making every item a no-op. Synthesising only the click hid that completely.
+     */
+    if (dup) {
+      const rect = dup.getBoundingClientRect()
+      const at = { clientX: rect.left + 4, clientY: rect.top + 4, bubbles: true, cancelable: true }
+      dup.dispatchEvent(new PointerEvent('pointerdown', { ...at, pointerId: 4, isPrimary: true, button: 0, buttons: 1 }))
+      await new Promise(r => setTimeout(r, 60))
+      const survived = !!menu()
+      dup.dispatchEvent(new PointerEvent('pointerup', { ...at, pointerId: 4, isPrimary: true, button: 0, buttons: 0 }))
+      dup.dispatchEvent(new MouseEvent('click', at))
+      window.__bfSelftestMenuSurvived = survived
+    }
     await new Promise(r => setTimeout(r, 350))
 
     const now = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
@@ -1588,11 +1628,18 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     dev.documents.getState().undo()
     await new Promise(r => setTimeout(r, 250))
 
-    return { afterDrag, opened, items: labels.length, before, after, closed }
+    return {
+      afterDrag, opened, openedOnPress, openedAfterPressOrdering,
+      survived: window.__bfSelftestMenuSurvived,
+      items: labels.length, before, after, closed
+    }
   })()`)) as {
     error?: string
     afterDrag?: boolean
     opened?: boolean
+    openedOnPress?: boolean
+    openedAfterPressOrdering?: boolean
+    survived?: boolean
     items?: number
     before?: number
     after?: number
@@ -1603,6 +1650,14 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     check(false, `context menu: ${contextMenu.error}`)
   } else {
     check(contextMenu.afterDrag === false, 'a right drag pans instead of opening the menu')
+    check(
+      contextMenu.openedAfterPressOrdering === true,
+      'a right click opens the menu when contextmenu fires on the press, as it does on macOS'
+    )
+    check(
+      contextMenu.survived === true,
+      'pressing a menu item does not dismiss the menu before the click lands'
+    )
     check(
       contextMenu.opened === true && (contextMenu.items ?? 0) >= 5,
       `a right click opened the menu with ${contextMenu.items} items`
@@ -1642,12 +1697,42 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     }
     if (listed.length === 0) return { error: 'no snapshot was written for an unsaved tab' }
 
-    // The stored document must come back whole, not as a stub.
-    const record = await c.snapshot.get({ documentId: listed[0].documentId })
     const countPanes = (p) => 1 + p.children.reduce((n, k) => n + countPanes(k), 0)
-    const panes = record && record.document && record.document.rootPane
-      ? countPanes(record.document.rootPane)
+
+    /*
+     * The snapshot must restore into a *working* tab, which is the part that used to be
+     * broken and invisible. Restoring pushed the stored document straight into a tab
+     * with no main-process session behind it, so it looked recovered right up until the
+     * first save failed with "layout document not found" — the one thing the feature is
+     * for. Going through snapshot.restore reopens the file and hands back a real session,
+     * and the proof is that serializing against it succeeds.
+     */
+    const restored = await c.snapshot.restore({ key: listed[0].key })
+    const panes = restored && restored.document && restored.document.rootPane
+      ? countPanes(restored.document.rootPane)
       : -1
+    const keyedByPath = listed[0].key.includes(String.fromCharCode(10))
+
+    let saveable = false
+    let saveDetail = ''
+    try {
+      /*
+       * No target path, so this re-encodes against the preserved sources and writes back
+       * where it came from. For an archive entry that lands in the in-memory archive and
+       * touches no file, which is what makes it safe to run here: the point is that the
+       * session and its section blobs exist at all, and serialising is the only thing
+       * that can prove it.
+       */
+      const written = await c.layout.save({
+        documentId: restored.documentId,
+        document: restored.document
+      })
+      saveable = written.bytes > 0
+      saveDetail = written.bytes + ' bytes'
+    } catch (cause) {
+      saveDetail = String(cause && cause.message ? cause.message : cause)
+    }
+    await c.layout.close({ documentId: restored.documentId })
 
     // Saving clears it: the file on disk is then the better copy.
     dev.documents.getState().markSaved(tab.documentId)
@@ -1661,6 +1746,9 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       wrote: listed.length,
       name: listed[0].displayName,
       panes,
+      keyedByPath,
+      saveable,
+      saveDetail,
       livePanes: countPanes(tab.document.rootPane),
       clearedAfterSave: after.length === 0
     }
@@ -1669,6 +1757,9 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     wrote?: number
     name?: string
     panes?: number
+    keyedByPath?: boolean
+    saveable?: boolean
+    saveDetail?: string
     livePanes?: number
     clearedAfterSave?: boolean
   }
@@ -1680,6 +1771,14 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     check(
       recovery.panes === recovery.livePanes && (recovery.panes ?? 0) > 1,
       `the snapshot holds the whole document (${recovery.panes} panes)`
+    )
+    check(
+      recovery.keyedByPath === true,
+      'snapshots are keyed by the file path, not by a per-process document id'
+    )
+    check(
+      recovery.saveable === true,
+      `a restored snapshot can be saved (${recovery.saveDetail})`
     )
     check(recovery.clearedAfterSave === true, 'saving discarded the snapshot')
   }

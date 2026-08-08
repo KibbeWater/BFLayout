@@ -16,6 +16,7 @@ import {
   openPurposeSchema,
   recentEntrySchema,
   recentKindSchema,
+  snapshotSummarySchema,
   bymlDocumentSchema,
   folderListingSchema,
   textureListSchema,
@@ -24,6 +25,7 @@ import {
 } from './schemas'
 
 export * from './schemas'
+export * from './snapshot-key'
 
 /**
  * Every procedure shares this error vocabulary. Main maps its Effect tagged
@@ -117,37 +119,24 @@ export const snapshotContract = {
   put: base
     .input(
       z.object({
-        documentId: z.string().min(1),
+        key: z.string().min(1),
         displayName: z.string(),
-        source: layoutSourceSchema,
         document: layoutDocumentSchema
       })
     )
     .output(okSchema),
-  list: base.output(
-    z.array(
-      z.object({
-        documentId: z.string(),
-        displayName: z.string(),
-        source: layoutSourceSchema,
-        updatedAt: z.number().int()
-      })
-    )
-  ),
-  get: base
-    .input(z.object({ documentId: z.string().min(1) }))
-    .output(
-      z
-        .object({
-          documentId: z.string(),
-          displayName: z.string(),
-          source: layoutSourceSchema,
-          document: layoutDocumentSchema,
-          updatedAt: z.number().int()
-        })
-        .nullable()
-    ),
-  remove: base.input(z.object({ documentId: z.string().min(1) })).output(okSchema),
+  list: base.output(z.array(snapshotSummarySchema)),
+  /**
+   * Reopens what the key names, then swaps the snapshot's document in.
+   *
+   * Going through a real open is the point: it re-establishes the main-process session
+   * and the preserved section bytes, without which the recovered document could be
+   * edited but never saved.
+   */
+  restore: base
+    .input(z.object({ key: z.string().min(1) }))
+    .output(openLayoutResultSchema.extend({ updatedAt: z.number().int() })),
+  remove: base.input(z.object({ key: z.string().min(1) })).output(okSchema),
   clear: base.output(okSchema)
 }
 

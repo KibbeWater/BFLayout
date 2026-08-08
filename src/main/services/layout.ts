@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
 import { Effect } from 'effect'
 
@@ -10,7 +11,12 @@ import {
   type LayoutDocument,
   type PreservedSources
 } from '@shared/formats/bflyt'
-import type { LayoutSource, OpenLayoutResult } from '@shared/contract'
+import {
+  snapshotKeyFor,
+  type DurableLayoutSource,
+  type LayoutSource,
+  type OpenLayoutResult
+} from '@shared/contract'
 import { FileNotFoundError, IoError, NotFoundError } from '@main/errors'
 import { ArchiveService } from './archive'
 import { FilesService } from './files'
@@ -34,10 +40,25 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
     const archives = yield* ArchiveService
 
     const open = new Map<string, OpenDocument>()
-    let sequence = 0
 
     const sourceLabel = (source: LayoutSource): string =>
       source.kind === 'file' ? basename(source.path) : source.entryKey.split('/').pop()!
+
+    /**
+     * The path-based identity of a source, for keying anything that outlives the
+     * process. An archive source carries a session-local `archiveId`, so this resolves
+     * it to the archive's actual path.
+     */
+    const durableKey = (source: LayoutSource): Effect.Effect<string, NotFoundError> =>
+      source.kind === 'file'
+        ? Effect.succeed(snapshotKeyFor({ kind: 'file', path: source.path }))
+        : Effect.map(archives.describeOne(source.archiveId), (descriptor) =>
+            snapshotKeyFor({
+              kind: 'archive',
+              archivePath: descriptor.path,
+              entryKey: source.entryKey
+            })
+          )
 
     const readBytes = (
       source: LayoutSource
@@ -76,7 +97,15 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
                 })
         })
 
-        const id = `doc_${++sequence}`
+        /*
+         * A UUID rather than a counter. Ids used to be `doc_1, doc_2, …` restarting
+         * every launch, which meant anything persisted against one — a recovery
+         * snapshot — could be claimed by an unrelated file on the next run. Even with
+         * snapshots now keyed by path, an id that cannot repeat removes a whole class
+         * of mistaken identity for free.
+         */
+        const id = randomUUID()
+        const snapshotKey = yield* durableKey(source)
         open.set(id, {
           id,
           source,
@@ -89,7 +118,8 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
           documentId: id,
           displayName: sourceLabel(source),
           source,
-          document: parsed.document
+          document: parsed.document,
+          snapshotKey
         }
       })
 
@@ -252,6 +282,41 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
         return { resolved, missing }
       })
 
+    /**
+     * Opens what a durable snapshot key names, then substitutes the recovered document
+     * for the one that was just parsed.
+     *
+     * Going through a real open is the whole point. A recovered document used to be
+     * pushed straight into a renderer tab with no main-process session behind it, so
+     * every save failed with "layout document not found" — the one thing the feature
+     * exists to do. Reopening the file gives it a session *and* the preserved section
+     * bytes, so the recovered edits save exactly as if they had never been lost. The
+     * file's own current contents are read and then discarded, which is the cost of
+     * getting those blobs.
+     */
+    const restore = (
+      source: DurableLayoutSource,
+      document: LayoutDocument
+    ): Effect.Effect<
+      OpenLayoutResult,
+      FileNotFoundError | IoError | NotFoundError | UnsupportedFormatError | FormatParseError
+    > =>
+      Effect.gen(function* () {
+        const live: LayoutSource =
+          source.kind === 'file'
+            ? source
+            : {
+                kind: 'archive',
+                archiveId: (yield* archives.openPath(source.archivePath)).archiveId,
+                entryKey: source.entryKey
+              }
+
+        const opened = yield* openLayout(live)
+        const session = yield* get(opened.documentId)
+        session.document = document
+        return { ...opened, document }
+      })
+
     const close = (documentId: string): Effect.Effect<void> =>
       Effect.sync(() => {
         open.delete(documentId)
@@ -265,6 +330,6 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
       }))
     )
 
-    return { openLayout, save, close, list, get, parts } as const
+    return { openLayout, restore, save, close, list, get, parts } as const
   })
 }) {}
