@@ -260,6 +260,35 @@ export const decodedTextureSchema = z.object({
 export type DecodedTexture = z.infer<typeof decodedTextureSchema>
 
 /**
+ * The typefaces one of a layout's named fonts resolves to.
+ *
+ * `faces` is a fallback chain in the order the game's own descriptor lists it —
+ * specialised faces first, main typeface last — which is also the order CSS resolves
+ * `font-family` in, so the renderer can hand it to a canvas verbatim.
+ *
+ * `missing` names faces the descriptor asked for that could not be produced. A chain with
+ * gaps still draws ordinary text correctly, so this is reported rather than raised, but it
+ * is reported: silently thinner fallback is how a preview drifts from the game without
+ * anyone noticing.
+ */
+export const fontChainSchema = z.object({
+  name: z.string(),
+  /** Path of the archive the faces came from, for error messages and diagnostics. */
+  archive: z.string(),
+  faces: z.array(
+    z.object({
+      /** Family name to register the face under; the filename without its extension. */
+      name: z.string(),
+      kind: z.enum(['otf', 'ttf', 'ttc']),
+      sfnt: binaryPayloadSchema
+    })
+  ),
+  missing: z.array(z.string())
+})
+
+export type FontChain = z.infer<typeof fontChainSchema>
+
+/**
  * Like the layout document, passed through by type rather than field-validated:
  * the codec has already proven the shape and both ends share the type.
  */

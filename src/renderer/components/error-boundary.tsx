@@ -13,6 +13,19 @@ interface State {
 }
 
 /**
+ * Every render error caught this session, newest last.
+ *
+ * Read by the end-to-end self-test. Kept here rather than on a dev global because the
+ * boundary is the only thing that knows, and because a caught-then-reset error is
+ * otherwise invisible.
+ */
+const renderErrors: string[] = []
+
+export function caughtRenderErrors(): readonly string[] {
+  return renderErrors
+}
+
+/**
  * Last line of defence for renderer crashes. Without this a thrown render error
  * unmounts the tree and leaves an empty window with no explanation.
  */
@@ -25,6 +38,13 @@ export class ErrorBoundary extends Component<Props, State> {
 
   override componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error('[bflayout] render error:', error, info.componentStack)
+    /*
+     * Recorded as well as logged, so the end-to-end pass can assert that a render error
+     * did *not* happen. A boundary that catches successfully leaves no trace in the DOM
+     * once it is reset, which is how a crash-and-recover looked identical to never
+     * crashing — twice, for the same conditional-hook mistake in two different panels.
+     */
+    renderErrors.push(error.message)
     this.props.onError?.(error, info)
   }
 

@@ -819,6 +819,63 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     check(panel.drawn === panel.rows, `every thumbnail decoded and drew (${panel.drawn}/${panel.rows})`)
   }
 
+  /*
+   * Closing the last tab with the Materials panel open.
+   *
+   * Panels that read the active document have to survive there not being one, and the way
+   * they fail is specific: a hook below an early return means React sees fewer hooks than
+   * on the previous render and throws, which the error boundary catches — so the whole
+   * editor goes to an error screen rather than the panel showing an empty state. This has
+   * happened twice in two panels, so it is worth a check that actually does it.
+   */
+  const emptyPanels = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const open = store.tabs.map(t => ({ documentId: t.documentId, snapshotKey: t.snapshotKey, displayName: t.displayName, source: t.source, document: t.document }))
+    if (open.length === 0) return { error: 'no tab to close' }
+
+    const failures = []
+    for (const name of ['materials', 'properties', 'textures', 'archive']) {
+      const before = dev.renderErrors ? dev.renderErrors().length : 0
+      const tab = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === name)
+      if (!tab) continue
+      tab.click()
+      await new Promise(r => setTimeout(r, 250))
+
+      // Close every tab while this panel is showing.
+      for (const entry of dev.documents.getState().tabs) {
+        dev.documents.getState().closeTab(entry.documentId)
+      }
+      await new Promise(r => setTimeout(r, 400))
+
+      /*
+       * The boundary's own record is the signal, not the DOM. A boundary that catches and
+       * then resets leaves the page looking perfectly normal, which is exactly why this
+       * bug survived two reviews and shipped twice.
+       */
+      const errors = dev.renderErrors ? dev.renderErrors() : []
+      if (errors.length > before) failures.push(name + ': ' + errors[errors.length - 1])
+
+      // Put the document back for the next panel and for later checks.
+      for (const entry of open) dev.documents.getState().openTab(entry, { newTab: true })
+      await new Promise(r => setTimeout(r, 400))
+    }
+
+    return { failures, tabs: dev.documents.getState().tabs.length }
+  })()`)) as { error?: string; failures?: string[]; tabs?: number }
+
+  if (emptyPanels.error) {
+    check(false, `panels with no document: ${emptyPanels.error}`)
+  } else {
+    check(
+      (emptyPanels.failures ?? ['unknown']).length === 0,
+      `every sidebar panel survives the last tab closing under it${
+        (emptyPanels.failures ?? []).length > 0 ? ` (broke: ${emptyPanels.failures!.join(', ')})` : ''
+      }`
+    )
+    check((emptyPanels.tabs ?? 0) > 0, 'the document was restored after the panel sweep')
+  }
+
   // The folder browser is the entry point for a romfs dump, so drive it through the
   // real sidebar tab rather than only through RPC.
   const folder = (await win.webContents.executeJavaScript(`(async () => {

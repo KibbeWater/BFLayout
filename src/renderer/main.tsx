@@ -4,7 +4,7 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from '@tanstack/react-router'
 
 import './globals.css'
-import { ErrorBoundary } from './components/error-boundary'
+import { caughtRenderErrors, ErrorBoundary } from './components/error-boundary'
 import { RpcGate } from './components/rpc-gate'
 import { Toaster } from './components/toaster'
 import { queryClient } from './lib/query'
@@ -42,6 +42,9 @@ if (import.meta.env.DEV) {
     editing: { panesInRect },
     // Exposed for the BC7 GPU cross-check, which needs a CPU decode to compare against.
     bntx: { decodeBc7Block },
+    // A caught render error leaves no trace once the boundary resets, so the self-test
+    // has no other way to tell a crash-and-recover from never having crashed.
+    renderErrors: caughtRenderErrors,
     router
   }
 }

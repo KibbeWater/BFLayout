@@ -18,6 +18,19 @@ import { useActiveTab, useDocuments } from '@renderer/editor/store/document'
 export function MaterialsPanel(): ReactNode {
   const tab = useActiveTab()
 
+  /*
+   * Above the early returns, and keyed on the revision rather than on `tab`.
+   *
+   * Hooks have to run unconditionally on every render. With this below the guards, closing
+   * the last tab while the Materials panel was open rendered one hook fewer than the
+   * previous pass and React threw — straight to the error boundary. `MaterialSection` in
+   * properties.tsx had exactly this bug and exactly this fix; this panel never got it.
+   */
+  const users = useMemo(
+    () => (tab ? collectUsers(tab.document) : new Map<number, Pane[]>()),
+    [tab?.documentId, tab?.revision]
+  )
+
   if (!tab) {
     return <p className="p-3 text-xs text-muted-foreground/60">Open a layout to see its materials.</p>
   }
@@ -26,11 +39,6 @@ export function MaterialsPanel(): ReactNode {
   if (materials.length === 0) {
     return <p className="p-3 text-xs text-muted-foreground/60">This layout has no materials.</p>
   }
-
-  // A full tree walk, so it is kept off the render path of every canvas drag
-  // frame: the store bumps `revision` on each mutation, and nothing else can
-  // change who uses a material.
-  const users = useMemo(() => collectUsers(tab.document), [tab.document, tab.revision])
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">
