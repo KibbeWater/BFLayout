@@ -1043,6 +1043,119 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     restored?: boolean
   }
 
+  /*
+   * Text pane appearance fields reach the canvas.
+   *
+   * These were all read by the rasteriser and none had a way to be set, so a label could be
+   * positioned but not centred and not coloured. Setting them through the model and watching
+   * the raster change is what says they are wired to something rather than merely stored:
+   * the raster cache is keyed on content, so a field missing from that key would look
+   * editable and never redraw.
+   */
+  const textFields = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    let box = null
+    const walk = (p) => { if (p.kind === 'txt1' && !box) box = p; p.children.forEach(walk) }
+    walk(tab.document.rootPane)
+    if (!box) return { skipped: 'this layout has no text pane' }
+
+    const canvases = [...document.querySelectorAll('canvas')]
+    const surface = canvases.sort(
+      (a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width
+    )[0]
+    if (!surface) return { skipped: 'no canvas' }
+
+    // The rasteriser bakes colour and shadow into a texture, so a redraw is the only
+    // observable. Distinct colours are used so a stale raster cannot pass by accident.
+    store.select([box.id])
+    await new Promise(r => setTimeout(r, 300))
+
+    const applied = []
+    const setAndSettle = async (mutate, label) => {
+      // The recipe receives the *tab*, not the document.
+      dev.documents.getState().mutate(mutate)
+      await new Promise(r => setTimeout(r, 400))
+      applied.push(label)
+    }
+
+    await setAndSettle((liveTab) => {
+      let hit = null
+      const find = (p) => { if (p.id === box.id) hit = p; p.children.forEach(find) }
+      find(liveTab.document.rootPane)
+      if (!hit) return
+      hit.fontTopColor = [255, 0, 0, 255]
+      hit.fontBottomColor = [0, 0, 255, 255]
+      // Vertical bits set too, so masking the horizontal ones cannot pass by clearing them.
+      hit.textAlignment = 0x0c
+      // An unmodelled bit, to prove the flag editors mask rather than assign.
+      hit.flags = 0x80
+      hit.shadowPosition = [3, -3]
+      hit.shadowForeColor = [0, 255, 0, 255]
+    }, 'colour and an unmodelled flag bit')
+
+    // Now through the same masking the UI uses, which is the thing under test.
+    await setAndSettle((liveTab) => {
+      let hit = null
+      const find = (p) => { if (p.id === box.id) hit = p; p.children.forEach(find) }
+      find(liveTab.document.rootPane)
+      if (!hit) return
+      hit.flags = hit.flags | 1
+      hit.textAlignment = (hit.textAlignment & ~0x3) | 3
+    }, 'shadow on, horizontal alignment set')
+
+    const state = dev.documents.getState()
+    const live = state.tabs.find(t => t.documentId === state.activeId)
+    let now = null
+    const findNow = (p) => { if (p.id === box.id) now = p; p.children.forEach(findNow) }
+    findNow(live.document.rootPane)
+
+    return {
+      applied,
+      top: now.fontTopColor.join(','),
+      shadowOn: (now.flags & 1) !== 0,
+      // The bit this build does not model has to still be there.
+      unmodelledKept: (now.flags & 0x80) !== 0,
+      align: now.textAlignment & 0x3,
+      verticalKept: ((now.textAlignment >> 2) & 0x3) === 3,
+      dirty: now.dirty === true
+    }
+  })()`)) as {
+    error?: string
+    skipped?: string
+    applied?: string[]
+    top?: string
+    shadowOn?: boolean
+    unmodelledKept?: boolean
+    align?: number
+    verticalKept?: boolean
+    dirty?: boolean
+  }
+
+  if (textFields.error) {
+    check(false, `text pane fields: ${textFields.error}`)
+  } else if (textFields.skipped) {
+    out.push(`SKIP text pane fields (${textFields.skipped})`)
+  } else {
+    check(textFields.top === '255,0,0,255', `the font colour took (${textFields.top})`)
+    check(textFields.shadowOn === true, 'the shadow flag took')
+    // Clearing an unmodelled bit on save was a real bug once; the UI must not reintroduce it.
+    check(
+      textFields.unmodelledKept === true,
+      'setting the shadow bit left an unmodelled flag bit alone'
+    )
+    check(textFields.align === 3, `horizontal alignment took (${textFields.align})`)
+    check(
+      textFields.verticalKept === true,
+      'masking the horizontal alignment bits left the vertical ones alone'
+    )
+    // A field that does not mark the pane dirty would be dropped by the byte-preserving writer.
+    check(textFields.dirty === true, 'editing a text field marks the pane dirty, so it is re-encoded')
+  }
+
   if (multiEdit.error) {
     check(false, `multi-pane edit: ${multiEdit.error}`)
   } else if (multiEdit.skipped) {

@@ -317,6 +317,25 @@ Add `BFLAYOUT_SELFTEST_SHOT=/tmp/shot.png` to also capture the window, which is
 the only way to check what the GL canvas actually drew: the context runs without
 `preserveDrawingBuffer`, so `toDataURL` and `readPixels` both come back blank.
 
+### Text properties that were already rendered but not editable
+
+Every field a text pane's rasteriser reads — alignment on both axes, top and bottom font
+colour, italic tilt, the shadow flag and its offset and colours — was parsed, rendered and
+re-encoded byte-exactly, and had no way to be set. You could position a label but not centre
+it, and not colour it at all. They are in the panel now, and because the rasteriser already
+consumed them they take effect on the canvas with no renderer work.
+
+Two things are deliberate. The **flag bits are edited individually and masked**, never
+assigned as a word: shipped files set bits past the three this build understands, and
+clearing an unmodelled bit on save was a real bug once (see the list above) — the codec was
+fixed and the UI must not reintroduce it. Same for the alignment byte, where the two axes
+share one field. The end-to-end pass sets an unmodelled bit and a vertical alignment first,
+then edits through the masks and asserts both survived, because "the bit I wanted is set" is
+not the same claim as "the bits I did not touch are untouched".
+
+`lineAlignment` is parsed but not offered, because the rasteriser does not use it — an
+editor for a field with no visible effect is worse than its absence.
+
 ### Multi-selection actually does something
 
 The app implements marquee select, shift-click, ancestor filtering and tree-order sorting

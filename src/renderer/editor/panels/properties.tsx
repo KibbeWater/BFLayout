@@ -23,6 +23,32 @@ import { ARRANGEMENT_LABELS, arrangeCommand, type Arrangement } from '@renderer/
 const ORIGIN_X = ['Left', 'Center', 'Right']
 const ORIGIN_Y = ['Top', 'Center', 'Bottom']
 
+/**
+ * Text alignment packs two axes into one byte: bits 0-1 horizontal, bits 2-3 vertical.
+ *
+ * Edited as two selects over the packed value rather than exposed as a number, and written
+ * with a mask so the bits above the two axes survive. `0` means "inherit from the material"
+ * in both axes, which is what most shipped panes use, so it is offered rather than folded
+ * into Left/Top.
+ */
+const TEXT_H_ALIGN = ['Inherit', 'Left', 'Right', 'Center']
+const TEXT_V_ALIGN = ['Inherit', 'Top', 'Bottom', 'Center']
+
+/**
+ * Bits in a text pane's `flags` word that this build understands.
+ *
+ * Edited individually and never as a word. Shipped files set bits past these, and clearing
+ * an unmodelled bit on save was a real bug once — the codec now preserves them, and this
+ * keeps the UI from undoing that.
+ */
+const TEXT_FLAG_SHADOW = 1 << 0
+const TEXT_FLAG_RESTRICTED = 1 << 1
+const TEXT_FLAG_PER_CHARACTER = 1 << 4
+
+function withBit(word: number, bit: number, on: boolean): number {
+  return on ? word | bit : word & ~bit
+}
+
 export function PropertiesPanel(): ReactNode {
   const tab = useActiveTab()
   const runCommand = useDocuments((state) => state.runCommand)
@@ -803,6 +829,127 @@ function KindSpecific({
               onChange={(value) => editKind((target) => ((target as TextPane).lineSpace = value))}
             />
           </Row>
+          {/*
+            Everything below was already read by the rasteriser and had no way to be set,
+            so a label could be positioned but not centred, and not coloured at all.
+          */}
+          <Row>
+            <Select
+              label="Align H"
+              options={TEXT_H_ALIGN}
+              value={text.textAlignment & 0x3}
+              onChange={(value) =>
+                editKind((target) => {
+                  const box = target as TextPane
+                  // Masked, so the vertical bits and anything above them survive.
+                  box.textAlignment = (box.textAlignment & ~0x3) | (value & 0x3)
+                })
+              }
+            />
+            <Select
+              label="Align V"
+              options={TEXT_V_ALIGN}
+              value={(text.textAlignment >> 2) & 0x3}
+              onChange={(value) =>
+                editKind((target) => {
+                  const box = target as TextPane
+                  box.textAlignment = (box.textAlignment & ~0xc) | ((value & 0x3) << 2)
+                })
+              }
+            />
+          </Row>
+          <Field label="Font colour">
+            <Row>
+              <ColorField
+                label="Top"
+                color={text.fontTopColor}
+                onChange={(value) =>
+                  editKind((target) => ((target as TextPane).fontTopColor = value))
+                }
+              />
+              <ColorField
+                label="Bottom"
+                color={text.fontBottomColor}
+                onChange={(value) =>
+                  editKind((target) => ((target as TextPane).fontBottomColor = value))
+                }
+              />
+            </Row>
+          </Field>
+          <Row>
+            <NumberField
+              label="Italic"
+              value={text.italicTilt}
+              step={0.05}
+              onChange={(value) => editKind((target) => ((target as TextPane).italicTilt = value))}
+            />
+          </Row>
+          <Row>
+            <Toggle
+              label="Shadow"
+              checked={(text.flags & TEXT_FLAG_SHADOW) !== 0}
+              onChange={(on) =>
+                editKind((target) => {
+                  const box = target as TextPane
+                  box.flags = withBit(box.flags, TEXT_FLAG_SHADOW, on)
+                })
+              }
+            />
+            <Toggle
+              label="Fixed length"
+              checked={(text.flags & TEXT_FLAG_RESTRICTED) !== 0}
+              onChange={(on) =>
+                editKind((target) => {
+                  const box = target as TextPane
+                  box.flags = withBit(box.flags, TEXT_FLAG_RESTRICTED, on)
+                })
+              }
+            />
+          </Row>
+          {(text.flags & TEXT_FLAG_SHADOW) !== 0 ? (
+            <>
+              <Row>
+                <NumberField
+                  label="Shadow X"
+                  value={text.shadowPosition[0]}
+                  onChange={(value) =>
+                    editKind((target) => ((target as TextPane).shadowPosition[0] = value))
+                  }
+                />
+                <NumberField
+                  label="Shadow Y"
+                  value={text.shadowPosition[1]}
+                  onChange={(value) =>
+                    editKind((target) => ((target as TextPane).shadowPosition[1] = value))
+                  }
+                />
+              </Row>
+              <Field label="Shadow colour">
+                <Row>
+                  <ColorField
+                    label="Front"
+                    color={text.shadowForeColor}
+                    onChange={(value) =>
+                      editKind((target) => ((target as TextPane).shadowForeColor = value))
+                    }
+                  />
+                  <ColorField
+                    label="Back"
+                    color={text.shadowBackColor}
+                    onChange={(value) =>
+                      editKind((target) => ((target as TextPane).shadowBackColor = value))
+                    }
+                  />
+                </Row>
+              </Field>
+            </>
+          ) : null}
+          {(text.flags & TEXT_FLAG_PER_CHARACTER) !== 0 ? (
+            <p className="text-[11px] text-muted-foreground/60">
+              This pane uses a per-character transform, which the canvas does not model — the
+              block is preserved on save but the preview ignores it.
+            </p>
+          ) : null}
         </Group>
       )
     }
