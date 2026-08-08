@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
+  ChevronUp,
+  Copy,
   Eye,
   EyeOff,
   Frame,
@@ -10,7 +13,6 @@ import {
   Puzzle,
   Scissors,
   Square,
-  Copy,
   Trash2,
   Type
 } from 'lucide-react'
@@ -28,9 +30,30 @@ import {
   addPane,
   deletePane,
   duplicatePane,
+  movePane,
+  resolveMove,
   setPaneSnapshot,
-  snapshotPane
+  snapshotPane,
+  type PaneMove
 } from '@renderer/editor/commands'
+
+/**
+ * Tree restructuring, in the order they read on screen.
+ *
+ * "Raise" moves a pane *later* among its siblings, which is what puts it on top:
+ * draw order is tree order. The label follows what the user sees, not the array.
+ */
+const MOVES: readonly {
+  move: PaneMove
+  label: string
+  keys: string
+  icon: ReactNode
+}[] = [
+  { move: 'raise', label: 'Bring forward', keys: 'Alt+Up', icon: <ChevronUp className="size-3.5" /> },
+  { move: 'lower', label: 'Send backward', keys: 'Alt+Down', icon: <ChevronDown className="size-3.5" /> },
+  { move: 'outdent', label: 'Move out of its parent', keys: 'Alt+Left', icon: <ChevronLeft className="size-3.5" /> },
+  { move: 'indent', label: 'Move into the pane above', keys: 'Alt+Right', icon: <ChevronRight className="size-3.5" /> }
+]
 import {
   countPanes,
   paneById,
@@ -144,6 +167,22 @@ function PaneActions(): ReactNode {
     runCommand(command)
   }
 
+  /**
+   * Restructures the tree. Offered as buttons as well as Alt+arrow, because draw
+   * order is tree order and this is the only way to change what draws on top —
+   * a capability nobody would guess was behind a modifier key.
+   */
+  const move = (direction: PaneMove): void => {
+    if (!tab || !selected) return
+    const target = resolveMove(tab.document, selected.id, direction)
+    if (!target) return
+    const command = movePane(tab.document, selected.id, target)
+    if (command) runCommand(command)
+  }
+
+  const canMove = (direction: PaneMove): boolean =>
+    tab !== undefined && selected !== null && resolveMove(tab.document, selected.id, direction) !== null
+
   const remove = (): void => {
     if (!tab || !selected || isRoot) return
     const command = deletePane(tab.document, selected.id)
@@ -180,6 +219,20 @@ function PaneActions(): ReactNode {
           </ul>
         ) : null}
       </div>
+      {MOVES.map((entry) => (
+        <button
+          key={entry.move}
+          type="button"
+          onClick={() => move(entry.move)}
+          disabled={!canMove(entry.move)}
+          title={`${entry.label} (${entry.keys})`}
+          aria-label={entry.label}
+          className="rounded p-0.5 hover:bg-accent disabled:opacity-30"
+        >
+          {entry.icon}
+        </button>
+      ))}
+
       <button
         type="button"
         onClick={duplicate}

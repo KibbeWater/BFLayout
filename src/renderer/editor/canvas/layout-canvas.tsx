@@ -44,8 +44,11 @@ import {
   composeCommands,
   deletePane,
   duplicatePane,
+  movePane,
+  resolveMove,
   setPaneFields,
-  type Command
+  type Command,
+  type PaneMove
 } from '@renderer/editor/commands'
 
 import { usePlayback } from '@renderer/editor/store/playback'
@@ -72,6 +75,21 @@ const CYCLE_TOLERANCE = 4
  * Arrow keys to a layout-space delta. Y is negated because layout space puts +Y
  * upwards while the keys mean screen directions.
  */
+/** Alt plus an arrow restructures the tree; see the keydown handler. */
+const MOVE_KEYS: Record<string, PaneMove> = {
+  ArrowUp: 'raise',
+  ArrowDown: 'lower',
+  ArrowRight: 'indent',
+  ArrowLeft: 'outdent'
+}
+
+const MOVE_LABELS: Record<PaneMove, string> = {
+  raise: 'Raise',
+  lower: 'Lower',
+  indent: 'Indent',
+  outdent: 'Outdent'
+}
+
 const NUDGE_KEYS: Record<string, readonly [number, number]> = {
   ArrowLeft: [-1, 0],
   ArrowRight: [1, 0],
@@ -297,6 +315,36 @@ export function LayoutCanvas(): ReactNode {
     if (copies.length > 0) state.select(copies)
   }, [])
 
+  /**
+   * Restructures the selection, as one undo entry.
+   *
+   * Applied one pane at a time so each resolves against the tree the previous move
+   * left behind — sibling indices shift as panes move, so resolving them all up front
+   * would place later ones wrongly.
+   */
+  const moveSelection = useCallback((paneIds: readonly string[], move: PaneMove): void => {
+    const state = useDocuments.getState()
+    const tab = state.tabs.find((entry) => entry.documentId === state.activeId)
+    if (!tab) return
+
+    const roots = independentSelection(rendererRef.current?.flattened ?? [], paneIds)
+    // Raising walks from the top down so panes do not step over each other.
+    const ordered = move === 'raise' ? [...roots].reverse() : roots
+
+    const commands: Command[] = []
+    for (const id of ordered) {
+      const target = resolveMove(tab.document, id, move)
+      if (!target) continue
+      const command = movePane(tab.document, id, target)
+      if (!command) continue
+      command.apply(tab.document)
+      commands.push(command)
+    }
+
+    if (commands.length === 0) return
+    state.runCommand(composeCommands(MOVE_LABELS[move], commands))
+  }, [])
+
   /** Deletes every selected pane, as one undo entry. */
   const deleteSelection = useCallback((paneIds: readonly string[]): void => {
     const state = useDocuments.getState()
@@ -375,6 +423,21 @@ export function LayoutCanvas(): ReactNode {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd') {
         event.preventDefault()
         duplicateSelection(selection)
+        return
+      }
+
+      /*
+       * Alt plus an arrow restructures the tree instead of nudging.
+       *
+       * Draw order is tree order, so raise and lower are the only way to change what
+       * draws on top. Alt is free here because it otherwise only suppresses snapping
+       * during a pointer drag.
+       */
+      if (event.altKey) {
+        const move = MOVE_KEYS[event.key]
+        if (!move) return
+        event.preventDefault()
+        moveSelection(selection, move)
         return
       }
 

@@ -10,8 +10,12 @@ import type { LayoutDocument, TextPane } from '@shared/formats/bflyt'
 import {
   addPane,
   composeCommands,
+  contains,
   deletePane,
   duplicatePane,
+  movePane,
+  placementOf,
+  resolveMove,
   setMaterialSnapshot,
   setPaneSnapshot,
   snapshotPane
@@ -341,5 +345,181 @@ describe('addPane', () => {
 
     command.invert(document)
     expect(document.rootPane!.children).toHaveLength(0)
+  })
+})
+
+/**
+ * Reordering and reparenting.
+ *
+ * Draw order *is* tree order, so moving a pane later among its siblings is the only
+ * way to bring it forward. Before this the only route was delete-and-recreate, which
+ * lost every property.
+ */
+describe('movePane', () => {
+  function threeSiblings(): {
+    document: LayoutDocument
+    a: ReturnType<typeof createPicturePane>
+    b: ReturnType<typeof createPicturePane>
+    c: ReturnType<typeof createPicturePane>
+  } {
+    const document = createLayoutDocument()
+    const a = createPicturePane('A')
+    const b = createPicturePane('B')
+    const c = createPicturePane('C')
+    document.rootPane!.children.push(a, b, c)
+    return { document, a, b, c }
+  }
+
+  const order = (document: LayoutDocument): string[] =>
+    document.rootPane!.children.map((pane) => pane.name)
+
+  it('reorders among siblings and undoes exactly', () => {
+    const { document, a } = threeSiblings()
+    const command = movePane(document, a.id, { parentId: document.rootPane!.id, index: 2 })!
+
+    command.apply(document)
+    expect(order(document)).toEqual(['B', 'C', 'A'])
+    command.invert(document)
+    expect(order(document)).toEqual(['A', 'B', 'C'])
+  })
+
+  it('reparents and undoes exactly', () => {
+    const { document, a, b } = threeSiblings()
+    const command = movePane(document, a.id, { parentId: b.id, index: 0 })!
+
+    command.apply(document)
+    expect(order(document)).toEqual(['B', 'C'])
+    expect(b.children.map((pane) => pane.name)).toEqual(['A'])
+
+    command.invert(document)
+    expect(order(document)).toEqual(['A', 'B', 'C'])
+    expect(b.children).toHaveLength(0)
+  })
+
+  it('refuses to move a pane inside its own subtree', () => {
+    // Allowing this would splice the pane into a child of itself and detach the whole
+    // subtree from the document.
+    const parent = createPicturePane('Parent')
+    const child = createPicturePane('Child')
+    parent.children.push(child)
+    const document = createLayoutDocument()
+    document.rootPane!.children.push(parent)
+
+    expect(movePane(document, parent.id, { parentId: child.id, index: 0 })).toBeNull()
+    expect(movePane(document, parent.id, { parentId: parent.id, index: 0 })).toBeNull()
+  })
+
+  it('refuses to move the root, which has no parent', () => {
+    const document = createLayoutDocument()
+    expect(movePane(document, document.rootPane!.id, { parentId: 'x', index: 0 })).toBeNull()
+  })
+
+  it('dirties both parents as well as the pane', () => {
+    // A pane's position in the stream encodes the tree, so the parents have to be
+    // re-emitted rather than replayed from their original bytes.
+    const { document, a, b } = threeSiblings()
+    const root = document.rootPane!
+    root.dirty = false
+    b.dirty = false
+    a.dirty = false
+
+    movePane(document, a.id, { parentId: b.id, index: 0 })!.apply(document)
+    expect(a.dirty).toBe(true)
+    expect(b.dirty).toBe(true)
+    expect(root.dirty).toBe(true)
+  })
+
+  it('clamps an out-of-range index rather than leaving a hole', () => {
+    const { document, a } = threeSiblings()
+    movePane(document, a.id, { parentId: document.rootPane!.id, index: 99 })!.apply(document)
+    expect(order(document)).toEqual(['B', 'C', 'A'])
+  })
+})
+
+describe('resolveMove', () => {
+  function nested(): { document: LayoutDocument; ids: Record<string, string> } {
+    const document = createLayoutDocument()
+    const a = createPicturePane('A')
+    const b = createPicturePane('B')
+    const inner = createPicturePane('Inner')
+    b.children.push(inner)
+    document.rootPane!.children.push(a, b)
+    return { document, ids: { a: a.id, b: b.id, inner: inner.id, root: document.rootPane!.id } }
+  }
+
+  it('raise moves later among siblings, because later draws on top', () => {
+    const { document, ids } = nested()
+    expect(resolveMove(document, ids['a']!, 'raise')).toEqual({ parentId: ids['root'], index: 1 })
+  })
+
+  it('lower moves earlier, and stops at the bottom', () => {
+    const { document, ids } = nested()
+    expect(resolveMove(document, ids['b']!, 'lower')).toEqual({ parentId: ids['root'], index: 0 })
+    expect(resolveMove(document, ids['a']!, 'lower')).toBeNull()
+  })
+
+  it('raise stops at the top', () => {
+    const { document, ids } = nested()
+    expect(resolveMove(document, ids['b']!, 'raise')).toBeNull()
+  })
+
+  it('indent makes a pane the last child of the sibling before it', () => {
+    const { document, ids } = nested()
+    // B moves under A, which has no children yet, so it lands at index 0.
+    expect(resolveMove(document, ids['b']!, 'indent')).toEqual({ parentId: ids['a'], index: 0 })
+  })
+
+  it('indent is impossible for the first sibling', () => {
+    const { document, ids } = nested()
+    expect(resolveMove(document, ids['a']!, 'indent')).toBeNull()
+  })
+
+  it('outdent places a pane after its former parent', () => {
+    const { document, ids } = nested()
+    expect(resolveMove(document, ids['inner']!, 'outdent')).toEqual({
+      parentId: ids['root'],
+      index: 2
+    })
+  })
+
+  it('outdent is impossible for a direct child of the root', () => {
+    const { document, ids } = nested()
+    expect(resolveMove(document, ids['a']!, 'outdent')).toBeNull()
+  })
+
+  it('every resolved move is a legal movePane', () => {
+    const { document, ids } = nested()
+    for (const id of [ids['a']!, ids['b']!, ids['inner']!]) {
+      for (const move of ['raise', 'lower', 'indent', 'outdent'] as const) {
+        const target = resolveMove(document, id, move)
+        if (!target) continue
+        expect(movePane(document, id, target)).not.toBeNull()
+      }
+    }
+  })
+})
+
+describe('placement helpers', () => {
+  it('placementOf finds the parent and index', () => {
+    const document = createLayoutDocument()
+    const a = createPicturePane('A')
+    const b = createPicturePane('B')
+    document.rootPane!.children.push(a, b)
+    expect(placementOf(document, b.id)).toEqual({ parentId: document.rootPane!.id, index: 1 })
+    expect(placementOf(document, document.rootPane!.id)).toBeNull()
+  })
+
+  it('contains reports a pane as containing itself and its descendants', () => {
+    const parent = createPicturePane('Parent')
+    const child = createPicturePane('Child')
+    const grandchild = createPicturePane('Grandchild')
+    child.children.push(grandchild)
+    parent.children.push(child)
+    const document = createLayoutDocument()
+    document.rootPane!.children.push(parent)
+
+    expect(contains(document, parent.id, parent.id)).toBe(true)
+    expect(contains(document, parent.id, grandchild.id)).toBe(true)
+    expect(contains(document, child.id, parent.id)).toBe(false)
   })
 })

@@ -16,6 +16,7 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | Text panes | Preview only — system font, not BFFNT |
 | Undo / redo | Working — every edit, including property, material and visibility |
 | Add / delete / duplicate pane, grid snapping | Working |
+| Reorder and reparent panes (z-order) | Working — buttons and Alt+arrows |
 | Keyboard editing (nudge, delete, duplicate, undo) | Working — see Keyboard |
 | BYML documents | Read-only tree viewer (v1–7, both byte orders) |
 | Session restore | Offers the previous session on launch |
@@ -50,6 +51,8 @@ this, and what the remaining 0.9% is.
 | Shift + arrows | Nudge by 10 |
 | Delete / Backspace | Delete the selection |
 | ⌘D | Duplicate the selection beside itself |
+| Alt + ↑ / ↓ | Bring forward / send backward among siblings |
+| Alt + ← / → | Move out of the parent / into the pane above |
 | Escape | Clear the selection |
 | ⌘Z / ⌘⇧Z | Undo / redo |
 | ⌘S / ⌘⇧S | Save / save as |
@@ -63,6 +66,10 @@ this, and what the remaining 0.9% is.
 
 Nudge, delete and duplicate act on the whole selection as **one** undo entry, so a
 twenty-pane drag is one press of ⌘Z rather than twenty.
+
+Reordering matters more than it sounds: **draw order is tree order**, so moving a pane
+later among its siblings is the only way to put it on top. Before this the only route
+was delete-and-recreate, which lost every property the pane had.
 
 Select-behind exists because painter's order makes the topmost pane the only hit, and
 shipped layouts routinely end with a full-screen `bnd1` or `pan1` — which then

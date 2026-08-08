@@ -1048,6 +1048,68 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * Reordering changes draw order, which is the whole point: tree order *is* paint
+   * order, so bringing a pane forward means moving it later among its siblings. Until
+   * this existed the only way to change what drew on top was delete-and-recreate.
+   */
+  const reorder = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    const parent = tab.document.rootPane.children.find(p => p.children.length >= 2)
+      ?? tab.document.rootPane
+    if (parent.children.length < 2) return { error: 'nothing with two siblings to reorder' }
+
+    const first = parent.children[0]
+    const namesBefore = parent.children.map(p => p.name)
+
+    store.select([first.id])
+    await new Promise(r => setTimeout(r, 200))
+
+    // Alt+ArrowUp raises, i.e. moves later among siblings.
+    window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'ArrowUp', altKey: true, bubbles: true, cancelable: true
+    }))
+    await new Promise(r => setTimeout(r, 300))
+
+    const now = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+    const findById = (p, id) =>
+      p.id === id ? p : p.children.reduce((f, c) => f || findById(c, id), null)
+    const parentNow = findById(now.document.rootPane, parent.id)
+    const namesAfter = parentNow.children.map(p => p.name)
+
+    // And undo puts it back.
+    dev.documents.getState().undo()
+    await new Promise(r => setTimeout(r, 250))
+    const undone = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+    const namesUndone = findById(undone.document.rootPane, parent.id).children.map(p => p.name)
+
+    return { namesBefore, namesAfter, namesUndone }
+  })()`)) as {
+    error?: string
+    namesBefore?: string[]
+    namesAfter?: string[]
+    namesUndone?: string[]
+  }
+
+  if (reorder.error) {
+    check(false, `reorder: ${reorder.error}`)
+  } else {
+    const before = reorder.namesBefore ?? []
+    const after = reorder.namesAfter ?? []
+    check(
+      before[0] !== after[0] && after[1] === before[0],
+      `Alt+Up moved a pane later among its siblings (${before.slice(0, 2).join(',')} -> ${after.slice(0, 2).join(',')})`
+    )
+    check(
+      JSON.stringify(reorder.namesUndone) === JSON.stringify(before),
+      'undo restored the original order'
+    )
+  }
+
+  /*
    * Drive a command down the real menu path: main sends `menu-command`, the
    * preload bridge relays it, the renderer acts.
    *

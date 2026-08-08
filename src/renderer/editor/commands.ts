@@ -181,6 +181,12 @@ export function setMaterialSnapshot(
 }
 
 /**
+ * The fixed width of a pane's name field, which the writer truncates to.
+ * See `writeBase` in shared/formats/bflyt/panes.ts.
+ */
+const PANE_NAME_BYTES = 0x18
+
+/**
  * Copies a pane and its subtree in beside the original.
  *
  * Copying an existing pane and nudging it is the most common edit in layout work —
@@ -191,12 +197,6 @@ export function setMaterialSnapshot(
  * animations and groups address panes *by name*; duplicating a name would make an
  * animation drive two panes at once.
  */
-/**
- * The fixed width of a pane's name field, which the writer truncates to.
- * See `writeBase` in shared/formats/bflyt/panes.ts.
- */
-const PANE_NAME_BYTES = 0x18
-
 export function duplicatePane(document: LayoutDocument, paneId: string): Command | null {
   const parent = findPane(document.rootPane, (candidate) =>
     candidate.children.some((child) => child.id === paneId)
@@ -248,6 +248,152 @@ export function duplicatePane(document: LayoutDocument, paneId: string): Command
 
   const copy = clone(original)
   return addPane(parent.id, copy, index + 1)
+}
+
+/** Where a pane sits: its parent and its index among that parent's children. */
+export interface PanePlacement {
+  readonly parentId: string
+  readonly index: number
+}
+
+/** Where `paneId` currently sits, or null if it is the root or missing. */
+export function placementOf(document: LayoutDocument, paneId: string): PanePlacement | null {
+  const parent = findPane(document.rootPane, (candidate) =>
+    candidate.children.some((child) => child.id === paneId)
+  )
+  if (!parent) return null
+  return { parentId: parent.id, index: parent.children.findIndex((child) => child.id === paneId) }
+}
+
+/** True when `ancestorId` is `paneId` or contains it, at any depth. */
+export function contains(document: LayoutDocument, ancestorId: string, paneId: string): boolean {
+  const ancestor = findPane(document.rootPane, (candidate) => candidate.id === ancestorId)
+  if (!ancestor) return false
+  if (ancestorId === paneId) return true
+  return findPane(ancestor, (candidate) => candidate.id === paneId) !== null
+}
+
+/**
+ * Moves a pane to a new parent and index.
+ *
+ * This is how z-order is changed at all: draw order *is* tree order, so a pane can
+ * only be brought forward by moving it later among its siblings. Before this the
+ * only way to reorder was to delete and recreate, which lost every property the
+ * pane had.
+ *
+ * Returns null when the move is impossible rather than corrupting the tree: the root
+ * has no parent to move within, and moving a pane inside its own subtree would
+ * detach that subtree from the document entirely.
+ */
+export function movePane(
+  document: LayoutDocument,
+  paneId: string,
+  to: PanePlacement
+): Command | null {
+  const from = placementOf(document, paneId)
+  if (!from) return null
+  if (contains(document, paneId, to.parentId)) return null
+
+  if (!findPane(document.rootPane, (candidate) => candidate.id === paneId)) return null
+
+  /**
+   * Resolves against the document it is handed, not the one captured above, so the
+   * command behaves like every other one here and does not hold a stale tree.
+   */
+  const place = (
+    target: LayoutDocument,
+    to: PanePlacement,
+    fromPlacement: PanePlacement
+  ): void => {
+    const pane = findPane(target.rootPane, (candidate) => candidate.id === paneId)
+    const oldParent = findPane(
+      target.rootPane,
+      (candidate) => candidate.id === fromPlacement.parentId
+    )
+    const newParent = findPane(target.rootPane, (candidate) => candidate.id === to.parentId)
+    if (!pane || !oldParent || !newParent) return
+
+    const at = oldParent.children.indexOf(pane)
+    if (at >= 0) oldParent.children.splice(at, 1)
+
+    const index = Math.max(0, Math.min(to.index, newParent.children.length))
+    newParent.children.splice(index, 0, pane)
+
+    /*
+     * Both parents are dirtied as well as the pane. A pane's own section carries its
+     * properties, but its *position in the stream* is what encodes the tree, so the
+     * parents have to be re-emitted rather than replayed from their original bytes.
+     */
+    pane.dirty = true
+    oldParent.dirty = true
+    newParent.dirty = true
+  }
+
+  const label = `Move ${
+    findPane(document.rootPane, (candidate) => candidate.id === paneId)?.name || 'pane'
+  }`
+
+  return {
+    label,
+    apply: (target) => place(target, to, from),
+    invert: (target) => place(target, from, to)
+  }
+}
+
+/**
+ * The four ways a pane can be moved through the tree without dragging.
+ *
+ * These are the outliner moves, chosen over drag-and-drop because they are precise,
+ * keyboard-driven, and unambiguous about where the pane lands — dropping between two
+ * rows of a deep tree is exactly the interaction that needs a steady hand and a lot
+ * of hit-testing to get right.
+ *
+ * `raise`/`lower` change draw order among siblings; `indent`/`outdent` change parent.
+ */
+export type PaneMove = 'raise' | 'lower' | 'indent' | 'outdent'
+
+/**
+ * Resolves a move to a placement, or null when it cannot be made.
+ *
+ * Later siblings draw on top, so "raise" means *up* visually but *later* in the
+ * array. The naming follows what the user sees.
+ */
+export function resolveMove(
+  document: LayoutDocument,
+  paneId: string,
+  move: PaneMove
+): PanePlacement | null {
+  const from = placementOf(document, paneId)
+  if (!from) return null
+
+  const parent = findPane(document.rootPane, (candidate) => candidate.id === from.parentId)
+  if (!parent) return null
+
+  switch (move) {
+    case 'raise':
+      // Already last, so already on top.
+      if (from.index >= parent.children.length - 1) return null
+      return { parentId: from.parentId, index: from.index + 1 }
+
+    case 'lower':
+      if (from.index <= 0) return null
+      return { parentId: from.parentId, index: from.index - 1 }
+
+    case 'indent': {
+      // Becomes the last child of the sibling before it, which is where an outliner
+      // puts it and keeps the visual order unchanged.
+      const previous = parent.children[from.index - 1]
+      if (!previous) return null
+      return { parentId: previous.id, index: previous.children.length }
+    }
+
+    case 'outdent': {
+      const grandparent = placementOf(document, parent.id)
+      // The root's children have nowhere further out to go.
+      if (!grandparent) return null
+      return { parentId: grandparent.parentId, index: grandparent.index + 1 }
+    }
+  }
 }
 
 /**
