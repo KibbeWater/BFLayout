@@ -1,9 +1,11 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { FileUp, FolderOpen, History, Layers, Loader2, Pin, X } from 'lucide-react'
+import { FileUp, FolderOpen, History, Layers, LifeBuoy, Loader2, Pin, X } from 'lucide-react'
 
-import { getOrpc } from '@renderer/lib/orpc'
+import { getClient, getOrpc } from '@renderer/lib/orpc'
+import { reportError, reportInfo, reportSuccess } from '@renderer/lib/toast'
+import { useDocuments } from '@renderer/editor/store/document'
 import { useOpenFile } from '@renderer/lib/use-open-file'
 import { useSessionRestore } from '@renderer/lib/use-session'
 import { IS_MAC, useFullscreen } from '@renderer/lib/use-fullscreen'
@@ -56,6 +58,120 @@ function SessionCard(): ReactNode {
   )
 }
 
+/**
+ * Offers back documents that were unsaved when the process last went away.
+ *
+ * Distinct from the previous-session card above, which reopens *files* from disk. This
+ * restores the working document itself — edits that were never written anywhere — so it
+ * is the only thing standing between a crash and lost work. It is offered rather than
+ * applied automatically for the same reason: silently reinstating an in-memory copy over
+ * a file someone has since changed elsewhere would be its own way to lose work.
+ */
+function RecoveryCard(): ReactNode {
+  const orpc = getOrpc()
+  const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const openTab = useDocuments((state) => state.openTab)
+  const [busy, setBusy] = useState(false)
+
+  const available = useQuery(orpc.snapshot.list.queryOptions())
+  const snapshots = available.data ?? []
+  if (snapshots.length === 0) return null
+
+  const invalidate = (): void => {
+    void queryClient.invalidateQueries({ queryKey: orpc.snapshot.list.key() })
+  }
+
+  const restore = (): void => {
+    setBusy(true)
+    void (async () => {
+      const client = getClient()
+      let recovered = 0
+      try {
+        for (const summary of snapshots) {
+          const record = await client.snapshot.get({ documentId: summary.documentId })
+          // A snapshot whose row will not parse is skipped rather than failing the lot.
+          if (!record) continue
+          openTab(
+            {
+              documentId: record.documentId,
+              displayName: record.displayName,
+              source: record.source,
+              document: record.document
+            },
+            { newTab: true }
+          )
+          recovered++
+        }
+
+        if (recovered === 0) {
+          reportInfo(
+            'Nothing to recover',
+            'The snapshots could not be read back, so they have been discarded.'
+          )
+          await client.snapshot.clear()
+        } else {
+          reportSuccess(
+            'Recovered',
+            `${recovered} unsaved layout${recovered === 1 ? '' : 's'} restored. They are still unsaved — save to write them to disk.`
+          )
+          await navigate({ to: '/editor' })
+        }
+        invalidate()
+      } catch (cause) {
+        reportError(cause, { retry: restore })
+      } finally {
+        setBusy(false)
+      }
+    })()
+  }
+
+  const discard = (): void => {
+    void (async () => {
+      try {
+        await getClient().snapshot.clear()
+        invalidate()
+      } catch (cause) {
+        reportError(cause, { retry: discard })
+      }
+    })()
+  }
+
+  const newest = Math.max(...snapshots.map((entry) => entry.updatedAt))
+
+  return (
+    <div className="flex w-full max-w-xl items-center gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3">
+      <LifeBuoy className="size-4 shrink-0 text-amber-500" />
+      <p className="min-w-0 flex-1 text-xs">
+        <span className="font-medium">Unsaved work recovered</span>
+        <span className="text-muted-foreground">
+          {' — '}
+          {snapshots.length} layout{snapshots.length === 1 ? '' : 's'}, last edited{' '}
+          {new Date(newest).toLocaleString()}
+        </span>
+      </p>
+      <button
+        type="button"
+        onClick={restore}
+        disabled={busy}
+        className="flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-accent disabled:opacity-50"
+      >
+        {busy ? <Loader2 className="size-3.5 animate-spin" /> : null}
+        Recover
+      </button>
+      <button
+        type="button"
+        onClick={discard}
+        className="rounded p-1 hover:bg-accent"
+        aria-label="Discard the recovered work"
+        title="Discard the recovered work"
+      >
+        <X className="size-3.5" />
+      </button>
+    </div>
+  )
+}
+
 export function WelcomeScreen(): ReactNode {
   const orpc = getOrpc()
   const queryClient = useQueryClient()
@@ -93,6 +209,7 @@ export function WelcomeScreen(): ReactNode {
         </p>
       </div>
 
+      <RecoveryCard />
       <SessionCard />
 
       <div className="flex flex-wrap items-center justify-center gap-2">

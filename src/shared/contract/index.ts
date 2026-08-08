@@ -106,6 +106,51 @@ export const appContract = {
   setUnsavedCount: base.input(z.object({ count: z.number().int().min(0) })).output(okSchema)
 }
 
+/**
+ * Crash-recovery snapshots.
+ *
+ * The renderer owns the working document, so it pushes one on a debounced timer while a
+ * tab holds unsaved edits. The close prompts cover a deliberate exit; this covers the
+ * process going away without one.
+ */
+export const snapshotContract = {
+  put: base
+    .input(
+      z.object({
+        documentId: z.string().min(1),
+        displayName: z.string(),
+        source: layoutSourceSchema,
+        document: layoutDocumentSchema
+      })
+    )
+    .output(okSchema),
+  list: base.output(
+    z.array(
+      z.object({
+        documentId: z.string(),
+        displayName: z.string(),
+        source: layoutSourceSchema,
+        updatedAt: z.number().int()
+      })
+    )
+  ),
+  get: base
+    .input(z.object({ documentId: z.string().min(1) }))
+    .output(
+      z
+        .object({
+          documentId: z.string(),
+          displayName: z.string(),
+          source: layoutSourceSchema,
+          document: layoutDocumentSchema,
+          updatedAt: z.number().int()
+        })
+        .nullable()
+    ),
+  remove: base.input(z.object({ documentId: z.string().min(1) })).output(okSchema),
+  clear: base.output(okSchema)
+}
+
 export const dialogContract = {
   /**
    * Asks whether to save, discard, or keep editing before losing changes.
@@ -288,7 +333,8 @@ export const contract = {
   textures: texturesContract,
   animation: animationContract,
   folder: folderContract,
-  byml: bymlContract
+  byml: bymlContract,
+  snapshot: snapshotContract
 }
 
 export type Contract = typeof contract

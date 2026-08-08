@@ -6,6 +6,7 @@ import { AnimationService } from '@main/services/animation'
 import { ArchiveService } from '@main/services/archive'
 import { DialogService } from '@main/services/dialog'
 import { BymlService } from '@main/services/byml'
+import { SnapshotService } from '@main/services/snapshots'
 import { FolderService } from '@main/services/folder'
 import { LayoutService } from '@main/services/layout'
 import { RecentsService } from '@main/services/recents'
@@ -210,6 +211,29 @@ const animationRoutes = {
   })
 }
 
+const snapshotRoutes = {
+  put: os.snapshot.put.handler(async ({ input }) => {
+    await run(Effect.flatMap(SnapshotService, (s) => s.put(input)))
+    return ok
+  }),
+
+  list: os.snapshot.list.handler(() => run(Effect.flatMap(SnapshotService, (s) => s.list()))),
+
+  get: os.snapshot.get.handler(({ input }) =>
+    run(Effect.flatMap(SnapshotService, (s) => s.get(input.documentId)))
+  ),
+
+  remove: os.snapshot.remove.handler(async ({ input }) => {
+    await run(Effect.flatMap(SnapshotService, (s) => s.remove(input.documentId)))
+    return ok
+  }),
+
+  clear: os.snapshot.clear.handler(async () => {
+    await run(Effect.flatMap(SnapshotService, (s) => s.clear()))
+    return ok
+  })
+}
+
 const bymlRoutes = {
   open: os.byml.open.handler(({ input }) =>
     run(Effect.flatMap(BymlService, (s) => s.open(input.path)))
@@ -224,7 +248,8 @@ export const router = os.router({
   textures: textureRoutes,
   animation: animationRoutes,
   folder: folderRoutes,
-  byml: bymlRoutes
+  byml: bymlRoutes,
+  snapshot: snapshotRoutes
 })
 
 export type AppRouter = typeof router

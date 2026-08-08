@@ -1,11 +1,14 @@
 import { useEffect, type ReactNode } from 'react'
 
+import { useAutosave } from '@renderer/lib/use-autosave'
 import { useSave } from '@renderer/lib/use-save'
 import { useUnsavedGuard } from '@renderer/lib/use-unsaved-guard'
 import { ErrorBoundary } from './error-boundary'
 
 export function AppShell({ children }: { children: ReactNode }): ReactNode {
   useSaveAllCommand()
+  // Recovery snapshots follow the documents, not the route.
+  useAutosave()
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">

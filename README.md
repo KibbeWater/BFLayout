@@ -23,6 +23,7 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | Keyboard editing (nudge, delete, duplicate, undo) | Working — see Keyboard |
 | BYML documents | Read-only tree viewer (v1–7, both byte orders) |
 | Session restore | Offers the previous session on launch |
+| Crash recovery | Snapshots unsaved documents; offers them back on launch |
 | BNTX textures | Decode and preview (BC1–BC5, all ASTC LDR block sizes, uncompressed; no BC6H/BC7) |
 | BFLAN animation | Parse, play, scrub, inspect keyframes (no keyframe editing) |
 | Canvas resize handles, rubber-band select, alignment guides | Working |
@@ -272,6 +273,27 @@ reached the GPU, and exits non-zero if anything failed.
 Add `BFLAYOUT_SELFTEST_SHOT=/tmp/shot.png` to also capture the window, which is
 the only way to check what the GL canvas actually drew: the context runs without
 `preserveDrawingBuffer`, so `toDataURL` and `readPixels` both come back blank.
+
+### Losing work
+
+Three separate things have to be true for edits to survive, and each is handled
+differently:
+
+- **A deliberate exit** — closing a tab, closing the window, quitting — prompts. Main
+  cannot see the document store, so the renderer pushes its unsaved count over RPC and
+  `BrowserWindow.on('close')` reads it synchronously, which it must: the only way to stop
+  a close is to `preventDefault` during the event.
+- **A crash or a kill** is covered by recovery snapshots. On a debounced timer, any tab
+  holding unsaved edits has its *document* written to sqlite — the document's own JSON,
+  not encoded layout bytes, so the editing state comes back exactly, including a document
+  the writer would currently refuse to encode. The welcome screen offers them back rather
+  than restoring automatically: silently reinstating an in-memory copy over a file
+  someone changed elsewhere is its own way to lose work. A successful save discards the
+  snapshot, since the file on disk is then the better copy.
+- **A save that half-succeeded** is why `markSaved` takes the revision the bytes were
+  built from. Serializing and writing is asynchronous, so an edit landing in between is
+  not on disk; clearing the flag anyway made it look saved and the tab-close guard then
+  discarded it silently.
 
 ### Textures
 

@@ -1219,6 +1219,76 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * Crash-recovery snapshots. The close and quit prompts cover a deliberate exit; this
+   * is what stands between a crash and losing every edit since the last save.
+   */
+  const recovery = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const c = window.__bfclient
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    await c.snapshot.clear()
+
+    // Dirty the document and wait past the autosave debounce.
+    const target = tab.document.rootPane.children[0]
+    store.select([target.id])
+    await new Promise(r => setTimeout(r, 200))
+    window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'ArrowRight', bubbles: true, cancelable: true
+    }))
+
+    let listed = []
+    for (let i = 0; i < 60 && listed.length === 0; i++) {
+      await new Promise(r => setTimeout(r, 250))
+      listed = await c.snapshot.list()
+    }
+    if (listed.length === 0) return { error: 'no snapshot was written for an unsaved tab' }
+
+    // The stored document must come back whole, not as a stub.
+    const record = await c.snapshot.get({ documentId: listed[0].documentId })
+    const countPanes = (p) => 1 + p.children.reduce((n, k) => n + countPanes(k), 0)
+    const panes = record && record.document && record.document.rootPane
+      ? countPanes(record.document.rootPane)
+      : -1
+
+    // Saving clears it: the file on disk is then the better copy.
+    dev.documents.getState().markSaved(tab.documentId)
+    let after = listed
+    for (let i = 0; i < 60 && after.length > 0; i++) {
+      await new Promise(r => setTimeout(r, 250))
+      after = await c.snapshot.list()
+    }
+
+    return {
+      wrote: listed.length,
+      name: listed[0].displayName,
+      panes,
+      livePanes: countPanes(tab.document.rootPane),
+      clearedAfterSave: after.length === 0
+    }
+  })()`)) as {
+    error?: string
+    wrote?: number
+    name?: string
+    panes?: number
+    livePanes?: number
+    clearedAfterSave?: boolean
+  }
+
+  if (recovery.error) {
+    check(false, `recovery snapshot: ${recovery.error}`)
+  } else {
+    check((recovery.wrote ?? 0) > 0, `an unsaved edit produced a snapshot of ${recovery.name}`)
+    check(
+      recovery.panes === recovery.livePanes && (recovery.panes ?? 0) > 1,
+      `the snapshot holds the whole document (${recovery.panes} panes)`
+    )
+    check(recovery.clearedAfterSave === true, 'saving discarded the snapshot')
+  }
+
+  /*
    * Switching layouts and coming back keeps the GPU textures. They used to be dropped
    * on every source change, so alternating between two tabs refetched and re-uploaded
    * every texture each time — a visible stall on a tab click.
