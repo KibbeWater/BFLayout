@@ -11,6 +11,7 @@ import type {
 import { walkPanes } from '@shared/formats/bflyt'
 import { paneById, useActiveTab, useDocuments } from '@renderer/editor/store/document'
 import {
+  composeCommands,
   PANE_NAME_BYTES,
   paneNameProblem,
   setMaterialSnapshot,
@@ -37,27 +38,81 @@ export function PropertiesPanel(): ReactNode {
     return <Hint>Select a pane in the hierarchy.</Hint>
   }
 
-  // With several panes picked, the group operations are what the panel is for: the
-  // field editors below only ever act on the first of them.
-  const multiple = tab.selectedPaneIds.length > 1
+  const selection = tab.selectedPaneIds
+  const multiple = selection.length > 1
 
   /**
-   * Applies a property edit and records it so Cmd+Z reverses it.
+   * Every selected pane of the same kind as the active one.
    *
-   * These edits used to go straight through `mutate`, which left every field in
-   * this panel outside undo — and worse, made the history lie: after typing in a
-   * width field, Cmd+Z would revert the previous canvas drag while the toolbar
-   * still described the drag as the thing about to be undone.
+   * Kind matters because the fields below are kind-specific past the common header: a
+   * `pic1` has vertex colours a `pan1` does not, and writing them onto the wrong pane kind
+   * would produce a document the writer cannot encode. The common fields — visible, size,
+   * alpha — are shared by every kind, so those fan out across the whole selection.
    *
-   * The whole pane is snapshotted rather than the specific fields touched, because
-   * `apply` is an opaque closure and every pane kind has different fields. Panes
-   * are small once children are excluded.
+   * Descendants are *not* excluded, unlike a move. Setting `visible` on a parent and its
+   * child is a perfectly meaningful thing to ask for; a move is the case where the parent
+   * carries the child anyway.
    */
-  const edit = (apply: () => void): void => {
-    const before = snapshotPane(pane)
-    apply()
-    const after = snapshotPane(pane)
-    runCommand(setPaneSnapshot(pane.id, `Edit ${pane.name || pane.kind}`, before, after))
+  const targets = (kindOnly: boolean): Pane[] => {
+    const found: Pane[] = []
+    for (const id of selection) {
+      const candidate = paneById(tab.document, id)
+      if (!candidate) continue
+      if (kindOnly && candidate.kind !== pane.kind) continue
+      found.push(candidate)
+    }
+    return found.length > 0 ? found : [pane]
+  }
+
+  /**
+   * Applies a property edit across the selection and records it as one undo entry.
+   *
+   * Two things this fixes. The panel used to edit only the first selected pane, which made
+   * the marquee, shift-click and ancestor filtering the rest of the app implements pointless
+   * the moment you wanted to change anything — setting alpha on twelve panes was twelve
+   * separate operations and twelve undo entries. And these edits once went straight through
+   * `mutate`, which left every field here outside undo and made the history lie: after
+   * typing in a width field, Cmd+Z reverted the previous canvas drag while the toolbar still
+   * named the drag as the thing about to be undone.
+   *
+   * The whole pane is snapshotted rather than the fields touched, because `apply` is an
+   * opaque closure and every kind has different fields. Panes are small once children are
+   * excluded, and one composed command keeps Cmd+Z symmetrical with the edit.
+   */
+  const edit = (
+    // Returns `unknown` rather than `void` so a bare assignment expression is a legal body:
+    // `(target) => (target.width = 8)` is the shape every call site here wants.
+    apply: (target: Pane) => unknown,
+    options?: { activeOnly?: boolean; kindOnly?: boolean }
+  ): void => {
+    // Some fields cannot sensibly fan out — a name has to be unique per pane.
+    const panes = options?.activeOnly ? [pane] : targets(options?.kindOnly ?? false)
+
+    const commands = panes.flatMap((target) => {
+      const before = snapshotPane(target)
+      apply(target)
+      const after = snapshotPane(target)
+      return [setPaneSnapshot(target.id, `Edit ${target.name || target.kind}`, before, after)]
+    })
+
+    if (commands.length === 0) return
+    runCommand(
+      commands.length === 1
+        ? commands[0]!
+        : composeCommands(`Edit ${commands.length} panes`, commands)
+    )
+  }
+
+  /**
+   * The value every selected pane agrees on, or undefined when they differ.
+   *
+   * A field showing the first pane's value while eleven others hold something else invites
+   * a blind overwrite, so a disagreeing field says so instead.
+   */
+  const shared = <T,>(read: (target: Pane) => T, kindOnly = false): T | undefined => {
+    const panes = targets(kindOnly)
+    const first = read(panes[0]!)
+    return panes.every((target) => read(target) === first) ? first : undefined
   }
 
   return (
@@ -67,7 +122,7 @@ export function PropertiesPanel(): ReactNode {
       <Group
         title={
           multiple
-            ? `${tab.selectedPaneIds.length} selected · editing ${pane.name || pane.kind}`
+            ? `${selection.length} selected · editing all`
             : `${pane.kind} · ${pane.name || '(unnamed)'}`
         }
       >
@@ -76,7 +131,7 @@ export function PropertiesPanel(): ReactNode {
           <TextField
             value={pane.name}
             maxLength={PANE_NAME_BYTES}
-            onChange={(next) => edit(() => (pane.name = next))}
+            onChange={(next) => edit((target) => (target.name = next), { activeOnly: true })}
             validate={(next) => paneNameProblem(tab.document, pane.id, next)}
           />
         </Field>
@@ -84,12 +139,12 @@ export function PropertiesPanel(): ReactNode {
           <Toggle
             label="Visible"
             checked={pane.visible}
-            onChange={(value) => edit(() => (pane.visible = value))}
+            onChange={(value) => edit((target) => (target.visible = value))}
           />
           <Toggle
             label="Influence alpha"
             checked={pane.influenceAlpha}
-            onChange={(value) => edit(() => (pane.influenceAlpha = value))}
+            onChange={(value) => edit((target) => (target.influenceAlpha = value))}
           />
         </Row>
         <Field label="Alpha">
@@ -99,7 +154,7 @@ export function PropertiesPanel(): ReactNode {
               min={0}
               max={255}
               value={pane.alpha}
-              onChange={(event) => edit(() => (pane.alpha = Number(event.target.value)))}
+              onChange={(event) => edit((target) => (target.alpha = Number(event.target.value)))}
               className="flex-1"
             />
             <span className="w-8 text-right tabular-nums text-muted-foreground">
@@ -114,48 +169,56 @@ export function PropertiesPanel(): ReactNode {
           <NumberField
             label="X"
             value={pane.translate[0]}
-            onChange={(value) => edit(() => (pane.translate[0] = value))}
+            mixed={shared((target) => target.translate[0]) === undefined}
+            onChange={(value) => edit((target) => (target.translate[0] = value))}
           />
           <NumberField
             label="Y"
             value={pane.translate[1]}
-            onChange={(value) => edit(() => (pane.translate[1] = value))}
+            mixed={shared((target) => target.translate[1]) === undefined}
+            onChange={(value) => edit((target) => (target.translate[1] = value))}
           />
           <NumberField
             label="Z"
             value={pane.translate[2]}
-            onChange={(value) => edit(() => (pane.translate[2] = value))}
+            mixed={shared((target) => target.translate[2]) === undefined}
+            onChange={(value) => edit((target) => (target.translate[2] = value))}
           />
         </Row>
         <Row>
           <NumberField
             label="Width"
             value={pane.width}
-            onChange={(value) => edit(() => (pane.width = value))}
+            mixed={shared((target) => target.width) === undefined}
+            onChange={(value) => edit((target) => (target.width = value))}
           />
           <NumberField
             label="Height"
             value={pane.height}
-            onChange={(value) => edit(() => (pane.height = value))}
+            mixed={shared((target) => target.height) === undefined}
+            onChange={(value) => edit((target) => (target.height = value))}
           />
         </Row>
         <Row>
           <NumberField
             label="Rot Z"
             value={pane.rotate[2]}
-            onChange={(value) => edit(() => (pane.rotate[2] = value))}
+            mixed={shared((target) => target.rotate[2]) === undefined}
+            onChange={(value) => edit((target) => (target.rotate[2] = value))}
           />
           <NumberField
             label="Scale X"
             value={pane.scale[0]}
+            mixed={shared((target) => target.scale[0]) === undefined}
             step={0.01}
-            onChange={(value) => edit(() => (pane.scale[0] = value))}
+            onChange={(value) => edit((target) => (target.scale[0] = value))}
           />
           <NumberField
             label="Scale Y"
             value={pane.scale[1]}
+            mixed={shared((target) => target.scale[1]) === undefined}
             step={0.01}
-            onChange={(value) => edit(() => (pane.scale[1] = value))}
+            onChange={(value) => edit((target) => (target.scale[1] = value))}
           />
         </Row>
         <Row>
@@ -163,13 +226,13 @@ export function PropertiesPanel(): ReactNode {
             label="Origin X"
             options={ORIGIN_X}
             value={pane.origin.x}
-            onChange={(value) => edit(() => (pane.origin.x = value))}
+            onChange={(value) => edit((target) => (target.origin.x = value))}
           />
           <Select
             label="Origin Y"
             options={ORIGIN_Y}
             value={pane.origin.y}
-            onChange={(value) => edit(() => (pane.origin.y = value))}
+            onChange={(value) => edit((target) => (target.origin.y = value))}
           />
         </Row>
         <Row>
@@ -177,13 +240,13 @@ export function PropertiesPanel(): ReactNode {
             label="Parent origin X"
             options={ORIGIN_X}
             value={pane.origin.parentX}
-            onChange={(value) => edit(() => (pane.origin.parentX = value))}
+            onChange={(value) => edit((target) => (target.origin.parentX = value))}
           />
           <Select
             label="Parent origin Y"
             options={ORIGIN_Y}
             value={pane.origin.parentY}
-            onChange={(value) => edit(() => (pane.origin.parentY = value))}
+            onChange={(value) => edit((target) => (target.origin.parentY = value))}
           />
         </Row>
       </Group>
@@ -631,13 +694,26 @@ function ColorField({
   )
 }
 
+/**
+ * The fields that only exist on one pane kind.
+ *
+ * `edit` is passed `kindOnly` for every one of these: a `pic1`'s vertex colours mean nothing
+ * on a `pan1`, and writing them there would build a document the writer cannot encode. So a
+ * mixed selection edits only the panes that share the active pane's kind, while the common
+ * fields above it fan out across everything selected.
+ */
 function KindSpecific({
   pane,
   edit
 }: {
   pane: Pane
-  edit: (apply: () => void) => void
+  edit: (
+    apply: (target: Pane) => unknown,
+    options?: { activeOnly?: boolean; kindOnly?: boolean }
+  ) => void
 }): ReactNode {
+  /** Every kind-specific write goes through this, so the scoping cannot be forgotten. */
+  const editKind = (apply: (target: Pane) => unknown): void => edit(apply, { kindOnly: true })
   switch (pane.kind) {
     case 'pic1': {
       const picture = pane as PicturePane
@@ -648,7 +724,7 @@ function KindSpecific({
               label="Material"
               value={picture.materialIndex}
               step={1}
-              onChange={(value) => edit(() => (picture.materialIndex = Math.max(0, value | 0)))}
+              onChange={(value) => editKind((target) => ((target as PicturePane).materialIndex = Math.max(0, value | 0)))}
             />
           </Row>
           <Field label="Vertex colours">
@@ -687,44 +763,44 @@ function KindSpecific({
               caption is re-rasterised and re-uploaded to the GPU on every change, and
               each one was its own undo entry.
             */}
-            <TextArea value={text.text} onChange={(next) => edit(() => (text.text = next))} />
+            <TextArea value={text.text} onChange={(next) => editKind((target) => ((target as TextPane).text = next))} />
           </Field>
           <Row>
             <NumberField
               label="Material"
               value={text.materialIndex}
               step={1}
-              onChange={(value) => edit(() => (text.materialIndex = Math.max(0, value | 0)))}
+              onChange={(value) => editKind((target) => ((target as TextPane).materialIndex = Math.max(0, value | 0)))}
             />
             <NumberField
               label="Font"
               value={text.fontIndex}
               step={1}
-              onChange={(value) => edit(() => (text.fontIndex = Math.max(0, value | 0)))}
+              onChange={(value) => editKind((target) => ((target as TextPane).fontIndex = Math.max(0, value | 0)))}
             />
           </Row>
           <Row>
             <NumberField
               label="Size X"
               value={text.fontSize[0]}
-              onChange={(value) => edit(() => (text.fontSize[0] = value))}
+              onChange={(value) => editKind((target) => ((target as TextPane).fontSize[0] = value))}
             />
             <NumberField
               label="Size Y"
               value={text.fontSize[1]}
-              onChange={(value) => edit(() => (text.fontSize[1] = value))}
+              onChange={(value) => editKind((target) => ((target as TextPane).fontSize[1] = value))}
             />
           </Row>
           <Row>
             <NumberField
               label="Char space"
               value={text.charSpace}
-              onChange={(value) => edit(() => (text.charSpace = value))}
+              onChange={(value) => editKind((target) => ((target as TextPane).charSpace = value))}
             />
             <NumberField
               label="Line space"
               value={text.lineSpace}
-              onChange={(value) => edit(() => (text.lineSpace = value))}
+              onChange={(value) => editKind((target) => ((target as TextPane).lineSpace = value))}
             />
           </Row>
         </Group>
@@ -740,13 +816,13 @@ function KindSpecific({
               label="Stretch L"
               value={window.stretchLeft}
               step={1}
-              onChange={(value) => edit(() => (window.stretchLeft = value | 0))}
+              onChange={(value) => editKind((target) => ((target as WindowPane).stretchLeft = value | 0))}
             />
             <NumberField
               label="Stretch R"
               value={window.stretchRight}
               step={1}
-              onChange={(value) => edit(() => (window.stretchRight = value | 0))}
+              onChange={(value) => editKind((target) => ((target as WindowPane).stretchRight = value | 0))}
             />
           </Row>
           <Row>
@@ -754,13 +830,13 @@ function KindSpecific({
               label="Stretch T"
               value={window.stretchTop}
               step={1}
-              onChange={(value) => edit(() => (window.stretchTop = value | 0))}
+              onChange={(value) => editKind((target) => ((target as WindowPane).stretchTop = value | 0))}
             />
             <NumberField
               label="Stretch B"
               value={window.stretchBottom}
               step={1}
-              onChange={(value) => edit(() => (window.stretchBottom = value | 0))}
+              onChange={(value) => editKind((target) => ((target as WindowPane).stretchBottom = value | 0))}
             />
           </Row>
           <p className="text-[11px] text-muted-foreground/60">
@@ -972,11 +1048,20 @@ function NumberField({
   label,
   value,
   step = 1,
+  mixed = false,
   onChange
 }: {
   label: string
   value: number
   step?: number
+  /**
+   * The selected panes disagree on this value.
+   *
+   * The field still shows the active pane's number — blanking it would lose the one piece
+   * of information there is — but says so, because a field silently showing one pane's
+   * value while eleven others hold something else invites an overwrite nobody intended.
+   */
+  mixed?: boolean
   onChange: (value: number) => void
 }): ReactNode {
   /**
@@ -1013,11 +1098,23 @@ function NumberField({
 
   return (
     <label className="min-w-0 flex-1">
-      <span className="mb-0.5 block truncate text-[11px] text-muted-foreground">{label}</span>
+      <span className="mb-0.5 flex items-center gap-1 truncate text-[11px] text-muted-foreground">
+        <span className="truncate">{label}</span>
+        {/* A dot rather than a word, so it fits beside a three-character label. */}
+        {mixed ? (
+          <span
+            title="The selected panes have different values here; editing sets them all"
+            className="text-amber-500"
+          >
+            •
+          </span>
+        ) : null}
+      </span>
       <input
         type="number"
         value={draft ?? (Number.isFinite(value) ? value : 0)}
         step={step}
+        title={mixed ? 'The selected panes differ; editing sets them all' : undefined}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={(event) => commit(event.target.value)}
         onKeyDown={(event) => {

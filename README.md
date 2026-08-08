@@ -317,6 +317,33 @@ Add `BFLAYOUT_SELFTEST_SHOT=/tmp/shot.png` to also capture the window, which is
 the only way to check what the GL canvas actually drew: the context runs without
 `preserveDrawingBuffer`, so `toDataURL` and `readPixels` both come back blank.
 
+### Multi-selection actually does something
+
+The app implements marquee select, shift-click, ancestor filtering and tree-order sorting
+for multi-pane moves — and then the only panel that edits anything read
+`selectedPaneIds[0]` and said so in a comment. Setting alpha across twelve panes was twelve
+operations and twelve undo entries.
+
+The properties panel now fans out. One field edit applies to the whole selection and lands
+as a **single** composed undo entry, so Cmd+Z is symmetrical with what you did. Two
+distinctions matter:
+
+- **Kind-specific fields are scoped to matching panes.** A `pic1`'s vertex colours mean
+  nothing on a `pan1`, and writing them there would build a document the writer cannot
+  encode — so a mixed selection edits only panes sharing the active pane's kind, while the
+  common fields (visible, size, alpha, transform) apply to everything selected.
+- **Name does not fan out**, because it is identity rather than a property: two panes cannot
+  share one, and `paneNameProblem` exists precisely to enforce that.
+
+Descendants are deliberately *not* excluded the way they are for a move. Setting `visible`
+on a parent and its child is a meaningful request; a move is the case where the parent
+carries the child anyway.
+
+A field whose selected panes disagree shows an amber dot. It still displays the active
+pane's value — blanking it would throw away the one piece of information available — but
+says so, because a field quietly showing one pane's number while eleven others hold
+something else invites an overwrite nobody intended.
+
 ### Where a keystroke goes
 
 Three things that all looked fine and were not:

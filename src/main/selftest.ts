@@ -952,6 +952,118 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   )
 
   /*
+   * The properties panel acts on the whole selection.
+   *
+   * It used to edit only the first selected pane, which made the marquee, shift-click,
+   * ancestor filtering and tree-order sorting the rest of the app implements pointless the
+   * moment you wanted to change anything: setting a width across twelve panes was twelve
+   * operations and twelve undo entries. Driven through the real input here, because the
+   * fan-out lives in the panel rather than in a command.
+   */
+  const multiEdit = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab) return { error: 'no active tab' }
+
+    const siblings = tab.document.rootPane.children.filter(p => p.kind !== 'prt1').slice(0, 3)
+    if (siblings.length < 2) return { skipped: 'need two sibling panes' }
+
+    const ids = siblings.map(p => p.id)
+    store.select(ids)
+    await new Promise(r => setTimeout(r, 350))
+
+    const properties = [...document.querySelectorAll('button')]
+      .find(b => b.textContent.trim() === 'properties')
+    if (properties) { properties.click(); await new Promise(r => setTimeout(r, 250)) }
+
+    const depthBefore = dev.documents.getState().tabs.find(t => t.documentId === store.activeId).history.undo.length
+
+    // The Width field, found by its label rather than by position.
+    const labels = [...document.querySelectorAll('label')]
+    const widthLabel = labels.find(l => l.textContent.trim().startsWith('Width'))
+    if (!widthLabel) return { skipped: 'no Width field on screen' }
+    const input = widthLabel.querySelector('input')
+    if (!input) return { skipped: 'the Width field has no input' }
+
+    // Focused first: these fields commit on blur, and blur() on an unfocused element does
+    // nothing at all — which looked exactly like the edit being ignored.
+    input.focus()
+    await new Promise(r => setTimeout(r, 80))
+
+    // The native setter, so React's onChange sees a real value change on a controlled input.
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value'
+    ).set
+    setter.call(input, '123')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+    input.blur()
+    await new Promise(r => setTimeout(r, 450))
+
+    const after = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+    const find = (id) => {
+      let hit = null
+      const walk = (p) => { if (p.id === id) hit = p; p.children.forEach(walk) }
+      walk(after.document.rootPane)
+      return hit
+    }
+    const widths = ids.map(id => find(id) && find(id).width)
+    const depthAfter = after.history.undo.length
+
+    // Undo has to put every one of them back, in one step.
+    dev.documents.getState().undo()
+    await new Promise(r => setTimeout(r, 350))
+    const restored = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
+    const findIn = (doc, id) => {
+      let hit = null
+      const walk = (p) => { if (p.id === id) hit = p; p.children.forEach(walk) }
+      walk(doc.rootPane)
+      return hit
+    }
+    const back = ids.map(id => findIn(restored.document, id).width)
+    const original = siblings.map(p => p.width)
+
+    return {
+      count: ids.length,
+      widths,
+      entries: depthAfter - depthBefore,
+      back,
+      original,
+      restored: back.every((w, i) => w === original[i])
+    }
+  })()`)) as {
+    error?: string
+    skipped?: string
+    count?: number
+    widths?: number[]
+    entries?: number
+    back?: number[]
+    original?: number[]
+    restored?: boolean
+  }
+
+  if (multiEdit.error) {
+    check(false, `multi-pane edit: ${multiEdit.error}`)
+  } else if (multiEdit.skipped) {
+    out.push(`SKIP multi-pane edit (${multiEdit.skipped})`)
+  } else {
+    check(
+      (multiEdit.widths ?? []).every((width) => width === 123),
+      `one field edit set the width on all ${multiEdit.count} selected panes (${(multiEdit.widths ?? []).join(', ')})`
+    )
+    // One entry, not one per pane: undo has to be symmetrical with the edit.
+    check(
+      multiEdit.entries === 1,
+      `the whole fan-out is a single undo entry (${multiEdit.entries})`
+    )
+    check(
+      multiEdit.restored === true,
+      `undo put every pane back (${(multiEdit.back ?? []).join(', ')} vs ${(multiEdit.original ?? []).join(', ')})`
+    )
+  }
+
+  /*
    * Text panes drawn in the game's own typeface.
    *
    * Needs a real dump, because the whole point is a lookup *across* it: this game ships no
