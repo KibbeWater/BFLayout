@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 
 import { getClient } from '@renderer/lib/orpc'
 import { useDocuments } from '@renderer/editor/store/document'
+import { newAutosaveMemory, planAutosave, shouldReschedule } from '@renderer/lib/autosave-plan'
 
 /**
  * Writes crash-recovery snapshots of unsaved documents.
@@ -9,20 +10,13 @@ import { useDocuments } from '@renderer/editor/store/document'
  * The close and quit prompts cover a deliberate exit. This covers the process going away
  * without one — a crash, a kill, a power cut — which was the remaining way to lose work.
  *
- * Snapshots are keyed by the file's durable identity (`tab.snapshotKey`), not by document
- * id: ids are minted per open and restart every launch, so a snapshot keyed by one could
- * be overwritten by an unrelated file on the next run, and a save could never find the
- * row it was meant to clear.
+ * What gets written and what gets discarded is decided in `autosave-plan.ts`, which is pure
+ * and unit-tested; this owns only the timing and the IPC. That split exists because the
+ * rule is where the mistakes were, and two of them cost real work — see that file.
  *
  * Debounced rather than periodic, because a snapshot is worth taking once editing pauses
- * and serialising a multi-megabyte document mid-drag would be pointless work. Two things
- * keep the debounce honest:
- *
- *   - Only a change in `revision` reschedules. The store also fires for selection and
- *     tab switches, and letting those push the timer out meant someone clicking steadily
- *     around the canvas could go arbitrarily long with no snapshot at all.
- *   - A max wait caps how long edits can hold it off, so a steady stream of small
- *     changes still gets written.
+ * and serialising a multi-megabyte document mid-drag would be pointless work. A max wait
+ * caps how long a steady stream of edits can hold it off.
  *
  * Failures are swallowed to a console warning on purpose. A snapshot is a safety net; if
  * it cannot be written there is nothing the user can do about it and nothing is lost yet,
@@ -35,9 +29,8 @@ export function useAutosave(): void {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined
     let deadline: ReturnType<typeof setTimeout> | undefined
-    /** Revisions already written, keyed by snapshot key, so an unchanged tab is not re-serialised. */
-    const written = new Map<string, number>()
-    /** Last seen revision per tab, so selection churn does not look like an edit. */
+    const memory = newAutosaveMemory()
+    /** Last seen revision per key, so selection churn does not look like an edit. */
     const seen = new Map<string, number>()
 
     const clearTimers = (): void => {
@@ -51,54 +44,28 @@ export function useAutosave(): void {
       clearTimers()
       const client = getClient()
       const { tabs } = useDocuments.getState()
-      const live = new Set(tabs.map((tab) => tab.snapshotKey))
+      const plan = planAutosave(tabs, memory)
 
-      for (const tab of tabs) {
-        /*
-         * A tab with no key cannot be snapshotted, and sending one anyway surfaced as
-         * "Input validation failed" from the RPC layer several seconds later — true, but
-         * useless for finding the tab that caused it. Say what is actually wrong.
-         */
-        if (!tab.snapshotKey) {
-          console.warn(
-            `[bflayout] no snapshot key for ${tab.displayName}; it will not be recoverable`
-          )
-          continue
-        }
+      for (const name of plan.unkeyed) {
+        // A tab with no key cannot be snapshotted, and sending one anyway surfaced as
+        // "Input validation failed" from the RPC layer — true, but useless for finding
+        // which tab caused it.
+        console.warn(`[bflayout] no snapshot key for ${name}; it will not be recoverable`)
+      }
 
-        if (!tab.unsaved) {
-          // Saved, so the file on disk is the better copy; drop any stale snapshot.
-          // Unconditionally, not only when this session wrote it: the row may well
-          // come from a previous run that crashed with this same file open.
-          if (written.get(tab.snapshotKey) !== -1) {
-            written.set(tab.snapshotKey, -1)
-            void client.snapshot
-              .remove({ key: tab.snapshotKey })
-              .catch((cause: unknown) =>
-                console.warn('[bflayout] could not discard a recovery snapshot:', cause)
-              )
-          }
-          continue
-        }
-
-        if (written.get(tab.snapshotKey) === tab.revision) continue
-        written.set(tab.snapshotKey, tab.revision)
+      for (const entry of plan.put) {
+        const tab = tabs.find((candidate) => candidate.snapshotKey === entry.key)
+        if (!tab) continue
         void client.snapshot
-          .put({
-            key: tab.snapshotKey,
-            displayName: tab.displayName,
-            document: tab.document
-          })
+          .put({ key: entry.key, displayName: entry.displayName, document: tab.document })
           .catch((cause: unknown) => {
-            written.delete(tab.snapshotKey)
+            // Forget it was written, so the next flush tries again.
+            memory.written.delete(entry.key)
             console.warn('[bflayout] could not write a recovery snapshot:', cause)
           })
       }
 
-      // A closed tab's snapshot goes with it: the guard already asked about its edits.
-      for (const key of [...written.keys()]) {
-        if (live.has(key)) continue
-        written.delete(key)
+      for (const key of plan.remove) {
         void client.snapshot
           .remove({ key })
           .catch((cause: unknown) =>
@@ -115,28 +82,10 @@ export function useAutosave(): void {
       deadline ??= setTimeout(flush, MAX_WAIT_MS)
     }
 
-    /**
-     * True when something changed that a snapshot would capture — an edit, a tab
-     * appearing or going away, or a save landing. Selection and collapse state are
-     * deliberately not in that list.
-     */
-    const worthSnapshotting = (): boolean => {
-      const { tabs } = useDocuments.getState()
-      let changed = tabs.length !== seen.size
-      for (const tab of tabs) {
-        const mark = tab.unsaved ? tab.revision : -1
-        if (seen.get(tab.snapshotKey) !== mark) changed = true
-        seen.set(tab.snapshotKey, mark)
-      }
-      const keys = new Set(tabs.map((tab) => tab.snapshotKey))
-      for (const key of [...seen.keys()]) if (!keys.has(key)) seen.delete(key)
-      return changed
-    }
-
-    worthSnapshotting()
+    shouldReschedule(useDocuments.getState().tabs, seen)
     schedule()
     const unsubscribe = useDocuments.subscribe(() => {
-      if (worthSnapshotting()) schedule()
+      if (shouldReschedule(useDocuments.getState().tabs, seen)) schedule()
     })
     return () => {
       clearTimers()

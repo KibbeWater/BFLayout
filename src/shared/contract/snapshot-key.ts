@@ -22,10 +22,16 @@ export type DurableLayoutSource =
   | { readonly kind: 'archive'; readonly archivePath: string; readonly entryKey: string }
 
 /**
- * `\n` is the separator because it cannot appear in a path on any platform this runs
- * on, while `#`, `:` and `|` all can.
+ * NUL is the separator, because it is the one byte that genuinely cannot appear in
+ * either half of a key.
+ *
+ * `#`, `:` and `|` all occur in real paths. So does a newline — POSIX filesystems permit
+ * it and only Windows forbids it — which would have produced a key that wrote fine and
+ * then failed to parse, so the file's snapshots were saved and never offered back. NUL
+ * cannot appear in a path on any supported platform, and a SARC entry name is a
+ * NUL-terminated string, so neither side can contain one.
  */
-const SEPARATOR = '\n'
+const SEPARATOR = '\u0000'
 
 export function snapshotKeyFor(source: DurableLayoutSource): string {
   return source.kind === 'file'

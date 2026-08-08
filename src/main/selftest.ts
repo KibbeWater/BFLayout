@@ -1745,7 +1745,8 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     const panes = restored && restored.document && restored.document.rootPane
       ? countPanes(restored.document.rootPane)
       : -1
-    const keyedByPath = listed[0].key.includes(String.fromCharCode(10))
+    // NUL-separated: 'file' or 'archive', then the path, then the entry name.
+    const keyedByPath = listed[0].key.includes(String.fromCharCode(0))
 
     let saveable = false
     let saveDetail = ''

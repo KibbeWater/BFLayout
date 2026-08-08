@@ -216,7 +216,13 @@ export const layoutContract = {
         dirty: z.boolean(),
         /** Where it ended up; differs from the input on a save-as. */
         source: layoutSourceSchema,
-        displayName: z.string()
+        displayName: z.string(),
+        /**
+         * The durable identity after the save. A save-as moves the file, and a key still
+         * naming the old one meant crash recovery would restore the new edits into — and
+         * then save over — the very file the user had moved away from.
+         */
+        snapshotKey: z.string()
       })
     ),
   close: base.input(z.object({ documentId: z.string() })).output(okSchema)

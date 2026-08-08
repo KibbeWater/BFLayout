@@ -42,14 +42,21 @@ describe('snapshot keys', () => {
     expect(one).not.toBe(two)
   })
 
+  it('survives a newline in a path, which POSIX allows', () => {
+    // Only Windows forbids it. A newline separator would have written a key that then
+    // failed to parse, so this file's snapshots would be saved and never offered back.
+    const source = { kind: 'file', path: '/games/od\nd/Menu.bflyt' } as const
+    expect(parseSnapshotKey(snapshotKeyFor(source))).toEqual(source)
+  })
+
   it('rejects anything it cannot read back', () => {
     // A row from an older build was keyed `doc_1`, which names nothing reopenable.
     expect(parseSnapshotKey('doc_1')).toBeNull()
     expect(parseSnapshotKey('')).toBeNull()
     expect(parseSnapshotKey('file')).toBeNull()
-    expect(parseSnapshotKey('file\n')).toBeNull()
-    expect(parseSnapshotKey('archive\n/a.szs')).toBeNull()
-    expect(parseSnapshotKey('folder\n/a')).toBeNull()
+    expect(parseSnapshotKey('file\u0000')).toBeNull()
+    expect(parseSnapshotKey('archive\u0000/a.szs')).toBeNull()
+    expect(parseSnapshotKey('folder\u0000/a')).toBeNull()
   })
 
   it('points staleness checks at the file that actually exists on disk', () => {

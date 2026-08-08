@@ -29,6 +29,7 @@
     // Renderer modules that are pure state/document manipulation with no DOM use, and
     // are covered by tests in tests/, so this project needs to see them.
     "src/renderer/editor/commands.ts",
+    "src/renderer/lib/autosave-plan.ts",
     "src/renderer/editor/store/document.ts",
     "electron.vite.config.ts",
     "drizzle.config.ts",

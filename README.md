@@ -329,9 +329,29 @@ differently:
   Restoring goes through a real `layout.open` on the file the key names, and only then
   swaps the recovered document in. Pushing the stored document straight into a tab looks
   like it works right up to the first save, which fails with *layout document not found*:
-  without a main-process session there are no preserved section bytes to re-encode
-  against, so the one thing recovery exists to do — getting the work back onto disk — is
-  the one thing that does not happen.
+  without a main-process session there is nothing to save against, so the one thing
+  recovery exists to do — getting the work back onto disk — is the one thing that does not
+  happen.
+
+  That reopen's preserved section bytes are then **thrown away**, which is the subtle
+  half. They are keyed by node id, and node ids come from a counter global to the module
+  that never resets, so they identify a node only within the process that minted them —
+  and the recovered document's ids came from the process that crashed. Keeping both would
+  let the writer replay one pane's bytes under a different pane, producing a valid file
+  quietly carrying the wrong sections. A recovered document is always re-encoded whole
+  from its model instead, which is exact: every layout and animation in the dump
+  re-encodes byte for byte from the model alone. Byte preservation is an optimisation for
+  untouched sections, and a recovered document has none — the bytes it came from are gone.
+
+  A snapshot is discarded when a file that *was* dirty goes clean again, which is what a
+  save looks like from the renderer. Not merely when a clean tab for it exists: after a
+  crash the welcome screen offers both "Reopen" and "Recover", and clicking Reopen would
+  otherwise have deleted the crash row four seconds later, before the user had declined
+  it. The key also follows a save-as, and every tab resyncs its key from main when an
+  archive is saved to a new path — a key left naming the old file meant recovery would
+  restore the new edits into, and then overwrite, the very file the user had moved away
+  from. `tests/autosave-plan.test.ts` holds that rule as a pure function, one test per
+  failure it prevents.
 
   The welcome screen offers snapshots back rather than restoring automatically, and says
   so when the file has been written to since the snapshot was taken: silently reinstating

@@ -41,7 +41,7 @@ describe('document store save point', () => {
     useDocuments.setState({ tabs: [], activeId: null })
     useDocuments.getState().openTab({
       documentId: 'doc_1',
-      snapshotKey: 'file\n/tmp/Test.bflyt',
+      snapshotKey: 'file\u0000/tmp/Test.bflyt',
       displayName: 'Test.bflyt',
       source: { kind: 'file', path: '/tmp/Test.bflyt' },
       document
@@ -143,6 +143,93 @@ describe('document store save point', () => {
     expect(tab().unsaved).toBe(true)
   })
 
+  it('activates the existing tab rather than opening a file twice', () => {
+    /*
+     * Two tabs on one file share a single recovery snapshot row, so whichever flushed
+     * last won and the other tab's edits became unrecoverable. Document ids are fresh
+     * per open, so the id check alone never caught it.
+     */
+    const store = useDocuments.getState()
+    const displaced = store.openTab({
+      documentId: 'doc_again',
+      snapshotKey: 'file\u0000/tmp/Test.bflyt',
+      displayName: 'Test.bflyt',
+      source: { kind: 'file', path: '/tmp/Test.bflyt' },
+      document: createLayoutDocument()
+    })
+
+    expect(useDocuments.getState().tabs).toHaveLength(1)
+    expect(useDocuments.getState().activeId).toBe('doc_1')
+    // The caller is handed the session it no longer needs, so it can release it.
+    expect(displaced).toBe('doc_again')
+  })
+
+  it('lets a recovered document take the place of a clean tab on the same file', () => {
+    // The recovered copy is the one carrying edits, so it wins — but only against a
+    // tab that has nothing to lose.
+    const displaced = useDocuments.getState().openTab(
+      {
+        documentId: 'doc_recovered',
+        snapshotKey: 'file\u0000/tmp/Test.bflyt',
+        displayName: 'Test.bflyt',
+        source: { kind: 'file', path: '/tmp/Test.bflyt' },
+        document: createLayoutDocument()
+      },
+      { newTab: true, unsaved: true }
+    )
+
+    expect(displaced).toBe('doc_1')
+    const tabs = useDocuments.getState().tabs
+    expect(tabs).toHaveLength(1)
+    expect(tabs[0]!.documentId).toBe('doc_recovered')
+    expect(tabs[0]!.unsaved).toBe(true)
+  })
+
+  it('never displaces a tab that holds unsaved work, even for the same file', () => {
+    const store = useDocuments.getState()
+    store.runCommand(rename(document, paneId, 'A'))
+
+    store.openTab(
+      {
+        documentId: 'doc_recovered',
+        snapshotKey: 'file\u0000/tmp/Test.bflyt',
+        displayName: 'Test.bflyt',
+        source: { kind: 'file', path: '/tmp/Test.bflyt' },
+        document: createLayoutDocument()
+      },
+      { newTab: true, unsaved: true }
+    )
+
+    expect(useDocuments.getState().tabs).toHaveLength(2)
+  })
+
+  it('follows a save-as, so the recovery key names the file being edited', () => {
+    /*
+     * A key left naming the old file meant crash recovery would restore the
+     * post-save-as edits into — and then save over — the very file the user had moved
+     * away from, while the file they thought they were editing was never offered.
+     */
+    const store = useDocuments.getState()
+    store.retarget(
+      'doc_1',
+      { kind: 'file', path: '/tmp/New.bflyt' },
+      'New.bflyt',
+      'file\u0000/tmp/New.bflyt'
+    )
+
+    const tab = useDocuments.getState().tabs[0]!
+    expect(tab.snapshotKey).toBe('file\u0000/tmp/New.bflyt')
+    expect(tab.displayName).toBe('New.bflyt')
+  })
+
+  it('resyncs keys from main, for when an archive moves under its tabs', () => {
+    // Saving an archive to a new path retargets every layout inside it at once.
+    useDocuments.getState().resyncKeys(new Map([['doc_1', 'archive\u0000/tmp/New.szs\u0000blyt/A.bflyt']]))
+    expect(useDocuments.getState().tabs[0]!.snapshotKey).toBe(
+      'archive\u0000/tmp/New.szs\u0000blyt/A.bflyt'
+    )
+  })
+
   it('opens a recovered document already unsaved, so every guard sees it', () => {
     // A recovered document exists nowhere on disk. Opening it clean left the close
     // prompt quiet and made the tab replaceable, so the next layout opened threw it away.
@@ -153,7 +240,7 @@ describe('document store save point', () => {
     const displaced = store.openTab(
       {
         documentId: 'doc_recovered',
-        snapshotKey: 'file\n/tmp/Recovered.bflyt',
+        snapshotKey: 'file\u0000/tmp/Recovered.bflyt',
         displayName: 'Recovered.bflyt',
         source: { kind: 'file', path: '/tmp/Recovered.bflyt' },
         document: createLayoutDocument()
@@ -170,7 +257,7 @@ describe('document store save point', () => {
     useDocuments.getState().setActive('doc_recovered')
     const replaced = useDocuments.getState().openTab({
       documentId: 'doc_next',
-      snapshotKey: 'file\n/tmp/Next.bflyt',
+      snapshotKey: 'file\u0000/tmp/Next.bflyt',
       displayName: 'Next.bflyt',
       source: { kind: 'file', path: '/tmp/Next.bflyt' },
       document: createLayoutDocument()
@@ -187,7 +274,7 @@ describe('document store save point', () => {
 
     const displaced = store.openTab({
       documentId: 'doc_2',
-      snapshotKey: 'file\n/tmp/Other.bflyt',
+      snapshotKey: 'file\u0000/tmp/Other.bflyt',
       displayName: 'Other.bflyt',
       source: { kind: 'file', path: '/tmp/Other.bflyt' },
       document: createLayoutDocument()

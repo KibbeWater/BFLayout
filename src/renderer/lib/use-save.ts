@@ -42,6 +42,19 @@ export function useSave(): SaveControls {
   const tab = useActiveTab()
   const markSaved = useDocuments((state) => state.markSaved)
   const retarget = useDocuments((state) => state.retarget)
+  const applyKeys = useDocuments((state) => state.resyncKeys)
+
+  /** Pulls every open document's current durable key back from main. */
+  const resyncKeys = async (): Promise<void> => {
+    try {
+      const summaries = await getClient().layout.list()
+      applyKeys(new Map(summaries.map((entry) => [entry.documentId, entry.snapshotKey])))
+    } catch (cause) {
+      // A stale key costs recoverability, not the save that just succeeded, so this
+      // reports to the console rather than turning a successful save into an error.
+      console.warn('[bflayout] could not refresh recovery keys after saving:', cause)
+    }
+  }
   const [saving, setSaving] = useState(false)
 
   /**
@@ -80,7 +93,15 @@ export function useSave(): SaveControls {
         )
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: orpc.archive.get.key() }),
-          noteRecent(archive.path, 'archive')
+          noteRecent(archive.path, 'archive'),
+          /*
+           * Saving the archive to a new path moves every layout inside it at once, so
+           * every open tab from that archive has a snapshot key naming the old file.
+           * Main is the authority on the current identity, so the keys come from there
+           * rather than being recomputed here from a path the renderer would have to
+           * guess at.
+           */
+          resyncKeys()
         ])
       } else {
         const result = await client.layout.save({
@@ -88,7 +109,7 @@ export function useSave(): SaveControls {
           document: target.document,
           ...(targetPath ? { path: targetPath } : {})
         })
-        retarget(target.documentId, result.source, result.displayName)
+        retarget(target.documentId, result.source, result.displayName, result.snapshotKey)
         reportSuccess(
           targetPath ? 'Saved a copy' : 'Saved',
           `${result.displayName} written (${result.bytes} bytes).`

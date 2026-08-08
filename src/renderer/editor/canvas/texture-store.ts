@@ -114,6 +114,15 @@ export class TextureStore {
     return store
   }
 
+  /** Stores an entry, freeing the GL texture it displaces. */
+  private replace(entries: Map<string, Entry>, name: string, entry: Entry): void {
+    const previous = entries.get(name)
+    if (previous?.texture && previous.texture !== entry.texture) {
+      this.gl.deleteTexture(previous.texture)
+    }
+    entries.set(name, entry)
+  }
+
   private release(entries: Map<string, Entry>): void {
     for (const entry of entries.values()) {
       if (entry.texture) this.gl.deleteTexture(entry.texture)
@@ -200,7 +209,13 @@ export class TextureStore {
       if (!entries) return
 
       const texture = this.upload(rgba, decoded.width, decoded.height)
-      entries.set(name, {
+      /*
+       * Whatever was under this name goes with it. Two fetches can be outstanding for
+       * one name — evict a source, reopen it, and `lookup` starts a second fetch while
+       * the first is still in flight — and overwriting the entry without freeing the old
+       * texture orphaned it with nothing left holding a handle to delete.
+       */
+      this.replace(entries, name, {
         state: 'ready',
         texture,
         size: [decoded.width, decoded.height],
@@ -210,7 +225,7 @@ export class TextureStore {
       if (this.disposed) return
       const entries = this.liveEntriesFor(source)
       if (!entries) return
-      entries.set(name, {
+      this.replace(entries, name, {
         state: 'missing',
         texture: null,
         size: null,

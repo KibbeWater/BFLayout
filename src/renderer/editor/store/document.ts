@@ -27,9 +27,12 @@ export interface DocumentTab {
    * The durable identity of the file behind this tab, for keying recovery snapshots.
    *
    * Carried on the tab rather than looked up, because a snapshot has to be discardable
-   * *after* the tab closes and its main-process session is gone.
+   * *after* the tab closes and its main-process session is gone. Not readonly: a save-as
+   * moves the file, and `retarget` has to follow it — a key still naming the old file
+   * meant recovery would restore the new edits into, and then save over, the very file
+   * the user had moved away from.
    */
-  readonly snapshotKey: string
+  snapshotKey: string
   displayName: string
   source: LayoutSource
   document: LayoutDocument
@@ -105,7 +108,17 @@ interface DocumentStore {
    */
   markSaved: (documentId?: string, atRevision?: number) => void
   /** Points a tab at a new file after a save-as. */
-  retarget: (documentId: string, source: LayoutSource, displayName: string) => void
+  retarget: (
+    documentId: string,
+    source: LayoutSource,
+    displayName: string,
+    snapshotKey: string
+  ) => void
+  /**
+   * Refreshes the durable keys from main, for when something moved the files rather than
+   * the tabs — saving an archive to a new path retargets every layout inside it at once.
+   */
+  resyncKeys: (keys: ReadonlyMap<string, string>) => void
 }
 
 function activeTab(state: DocumentStore): DocumentTab | undefined {
@@ -121,6 +134,40 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
     if (state.tabs.some((t) => t.documentId === tab.documentId)) {
       set({ activeId: tab.documentId })
       return null
+    }
+
+    /*
+     * One tab per file. Document ids are fresh per open, so nothing else stopped the
+     * same layout appearing twice — and two tabs on one file share a single recovery
+     * snapshot row, so whichever flushed last won and the other's edits became
+     * unrecoverable.
+     *
+     * A clean duplicate is simply activated, and its session released. When the incoming
+     * document is a recovery it takes the clean tab's place instead, since the recovered
+     * copy is the one with the edits. An existing tab holding *unsaved* work is never
+     * touched: opening beside it costs a shared snapshot row, discarding it costs the
+     * work itself.
+     */
+    const sameFile = state.tabs.find((t) => t.snapshotKey === tab.snapshotKey)
+    if (sameFile && !sameFile.unsaved) {
+      if (!options?.unsaved) {
+        set({ activeId: sameFile.documentId })
+        return tab.documentId
+      }
+      const recovered: DocumentTab = {
+        ...tab,
+        selectedPaneIds: [],
+        collapsedIds: new Set<string>(),
+        unsaved: true,
+        savedDepth: -1,
+        revision: 0,
+        history: EMPTY_UNDO
+      }
+      set({
+        tabs: state.tabs.map((t) => (t.documentId === sameFile.documentId ? recovered : t)),
+        activeId: recovered.documentId
+      })
+      return sameFile.documentId
     }
 
     const unsaved = options?.unsaved ?? false
@@ -315,11 +362,19 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
       })
     })),
 
-  retarget: (documentId, source, displayName) =>
+  retarget: (documentId, source, displayName, snapshotKey) =>
     set((state) => ({
       tabs: state.tabs.map((tab) =>
-        tab.documentId === documentId ? { ...tab, source, displayName } : tab
+        tab.documentId === documentId ? { ...tab, source, displayName, snapshotKey } : tab
       )
+    })),
+
+  resyncKeys: (keys) =>
+    set((state) => ({
+      tabs: state.tabs.map((tab) => {
+        const fresh = keys.get(tab.documentId)
+        return fresh === undefined || fresh === tab.snapshotKey ? tab : { ...tab, snapshotKey: fresh }
+      })
     }))
 }))
 

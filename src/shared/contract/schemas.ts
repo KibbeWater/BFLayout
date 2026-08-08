@@ -184,7 +184,12 @@ export type OpenLayoutResult = z.infer<typeof openLayoutResultSchema>
 export const layoutSummarySchema = z.object({
   documentId: z.string(),
   displayName: z.string(),
-  source: layoutSourceSchema
+  source: layoutSourceSchema,
+  /**
+   * Recomputed from the session's *current* source, so a tab can resync after something
+   * moved the file underneath it — a save-as, or an archive saved to a new path.
+   */
+  snapshotKey: z.string()
 })
 
 export type LayoutSummary = z.infer<typeof layoutSummarySchema>

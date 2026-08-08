@@ -139,7 +139,13 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
       document: LayoutDocument,
       targetPath?: string
     ): Effect.Effect<
-      { bytes: number; dirty: boolean; source: LayoutSource; displayName: string },
+      {
+        bytes: number
+        dirty: boolean
+        source: LayoutSource
+        displayName: string
+        snapshotKey: string
+      },
       NotFoundError | IoError | FormatWriteError | UnsupportedFormatError
     > =>
       Effect.gen(function* () {
@@ -187,7 +193,9 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
           bytes: encoded.length,
           dirty: isDocumentDirty(document),
           source: session.source,
-          displayName: session.displayName
+          displayName: session.displayName,
+          // Derived from the retargeted source, not the one the save started with.
+          snapshotKey: yield* durableKey(session.source)
         }
       })
 
@@ -314,6 +322,27 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
         const opened = yield* openLayout(live)
         const session = yield* get(opened.documentId)
         session.document = document
+
+        /*
+         * The preserved bytes from that parse are thrown away, deliberately.
+         *
+         * They are keyed by node id, and node ids come from a counter that is global to
+         * the module and never resets — so they identify a node only within the process
+         * that minted them. The recovered document's ids came from the process that
+         * crashed. Keeping both would let `writeBflyt` replay one pane's original bytes
+         * under a different pane, producing a structurally valid file quietly carrying
+         * the wrong sections; where the ids merely failed to line up it would silently
+         * fall back to a full re-encode anyway.
+         *
+         * So: always the full re-encode, from the recovered model alone. That is exact —
+         * every one of the 544 layouts and 2,187 animations in the dump re-encodes byte
+         * for byte from the model, which is precisely what `validate:romfs` forces — and
+         * it is the only version of this that cannot mix two files together. Byte
+         * preservation is an optimisation for untouched sections; a recovered document
+         * has no untouched sections to preserve, because the bytes it came from are gone.
+         */
+        session.sources.clear()
+
         return { ...opened, document }
       })
 
@@ -322,12 +351,17 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
         open.delete(documentId)
       })
 
-    const list = Effect.sync(() =>
-      [...open.values()].map((entry) => ({
-        documentId: entry.id,
-        displayName: entry.displayName,
-        source: entry.source
-      }))
+    const list = Effect.forEach(
+      // Snapshot the sessions first: durableKey can suspend, and an archive lookup
+      // resolving mid-iteration should not see a half-mutated map.
+      [...open.values()],
+      (entry) =>
+        Effect.map(durableKey(entry.source), (snapshotKey) => ({
+          documentId: entry.id,
+          displayName: entry.displayName,
+          source: entry.source,
+          snapshotKey
+        }))
     )
 
     return { openLayout, restore, save, close, list, get, parts } as const
