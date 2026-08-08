@@ -22,7 +22,8 @@
     "package": "electron-vite build && electron-builder",
     "postinstall": "electron-builder install-app-deps",
     "validate:romfs": "tsx --tsconfig tsconfig.node.json scripts/validate-romfs.ts",
-    "validate:astc": "tsx --tsconfig tsconfig.node.json scripts/validate-astc.ts"
+    "validate:astc": "tsx --tsconfig tsconfig.node.json scripts/validate-astc.ts",
+    "validate:byml": "tsx --tsconfig tsconfig.node.json scripts/validate-byml.ts"
   },
   "dependencies": {
     "@bokuweb/zstd-wasm": "0.0.27",

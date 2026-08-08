@@ -113,6 +113,32 @@ export class BinaryReader {
     return value
   }
 
+  /**
+   * 64-bit integers as `bigint`, because a `number` cannot hold the full range
+   * and BYML stores real 64-bit values. Callers that only display them can
+   * stringify; callers that round-trip them must not go through `number`.
+   */
+  u64(): bigint {
+    this.need(8)
+    const value = this.view.getBigUint64(this.pos, this.littleEndian)
+    this.pos += 8
+    return value
+  }
+
+  i64(): bigint {
+    this.need(8)
+    const value = this.view.getBigInt64(this.pos, this.littleEndian)
+    this.pos += 8
+    return value
+  }
+
+  f64(): number {
+    this.need(8)
+    const value = this.view.getFloat64(this.pos, this.littleEndian)
+    this.pos += 8
+    return value
+  }
+
   /** Reads big-endian regardless of the current setting (for byte-order marks). */
   u16be(): number {
     this.need(2)
