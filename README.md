@@ -303,6 +303,15 @@ close, a full layout open → edit → save → reopen cycle, and the texture pi
 end to end — then drives the real editor UI, confirms every referenced texture
 reached the GPU, and exits non-zero if anything failed.
 
+Two things about this suite are worth knowing before adding to it. **Text-field commits do
+not depend on the window being frontmost**: Chromium suppresses focus and blur events for a
+document without OS focus, so `element.blur()` alone silently did nothing when the terminal
+had focus — five checks failed for reasons unrelated to what they tested, and passed whenever
+the app window happened to be in front. They dispatch `focusout` explicitly now, which is
+what React actually listens for. And **the renderer-side scripts are template literals**, so a
+backtick anywhere inside one — including inside a comment — ends the literal early and the
+build fails pointing at the comment rather than the quoting.
+
 Several checks exist because the obvious version of the test passed while the
 feature was broken. The context menu is pressed with a real `pointerdown` before
 the click, since a bare `.click()` never triggered the dismiss listener that used

@@ -153,6 +153,20 @@ export function LayoutCanvas(): ReactNode {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const rendererRef = useRef<LayoutRenderer | null>(null)
   const cameraRef = useRef<Camera>({ x: 0, y: 0, zoom: 0.6 })
+  /**
+   * Where each tab was left, keyed by document id.
+   *
+   * The canvas stays mounted across tab switches, so one camera was shared by every
+   * document: zoom into a corner of one layout, switch to another, and the second appeared to
+   * be missing entirely — it was off-screen at the first one's magnification. Layouts also
+   * differ in authored size by an order of magnitude, so a zoom that suits one is wrong for
+   * the next even without panning.
+   *
+   * A plain Map rather than store state: this is view position, not document state. It must
+   * not enter undo, must not mark anything unsaved, and must not be persisted — reopening a
+   * file fits it afresh, which is what someone opening a layout wants to see.
+   */
+  const camerasRef = useRef(new Map<string, Camera>())
   const dragRef = useRef<DragState | null>(null)
   const resizeRef = useRef<ResizeState | null>(null)
   const panRef = useRef<{ x: number; y: number } | null>(null)
@@ -216,6 +230,9 @@ export function LayoutCanvas(): ReactNode {
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null)
 
   const tab = useActiveTab()
+  // Only for pruning cameras of tabs that have closed; the identity is what matters, not
+  // the contents, so this does not re-render on edits.
+  const tabIds = useDocuments((state) => state.tabs.map((entry) => entry.documentId).join('|'))
   // Playback drives redraws through this: the overrides object is replaced on
   // every frame change, so it is the only dependency the draw effect needs.
   const overrides = usePlayback((state) => state.overrides)
@@ -563,42 +580,65 @@ export function LayoutCanvas(): ReactNode {
   const snap = settings.data?.snapToGuides ?? true
 
   /*
-   * Toggling a setting, without the two failures that come from these living in settings
-   * rather than in component state.
+   * Toggling a view setting, where the *intent* is authoritative rather than the query.
+   *
+   * These live in settings so they survive a restart, which introduces two failures that
+   * component state would not have had:
    *
    *   - The View menu handler is registered once at mount with no deps, so a plain
-   *     `!showGrid` captured the *first* render's value — and on the first render
-   *     `settings.data` is still undefined, so the closure read `true` forever and Toggle
-   *     Grid could only ever turn the grid off. The toolbar button got a fresh closure each
-   *     render and still worked, which made it look intermittent.
+   *     `!showGrid` captured the first render's value — and on the first render
+   *     `settings.data` is still undefined, so the closure read `true` forever and Toggle Grid
+   *     could only ever turn the grid off. The toolbar button got a fresh closure each render
+   *     and still worked, which made it look intermittent.
    *   - `patch` only changes what the query reports once the mutation lands and the query
-   *     refetches, so two quick clicks both read the same stale value and land on the same
-   *     state.
+   *     refetches, so two quick clicks both read the same value and both wrote the same one.
    *
-   * Writing the new value into the query cache immediately fixes both, and does it in one
-   * place: `showGrid` below is correct on the very next render, so the menu's stable closure
-   * reads it through a ref that an effect keeps in step, and a second click sees the first
-   * one. An earlier attempt assigned that ref during render instead — which React 19 does not
-   * support, and which reset it to the stale query value on the re-render the mutation itself
-   * causes, reproducing the lost update it was meant to fix.
+   * Two earlier attempts at the second one failed in instructive ways. Assigning a ref during
+   * render is unsupported in React 19 and was reset to the stale query value by the re-render
+   * the mutation itself causes. Writing the new value into the query cache looked right but
+   * used `.key()`, a partial-match key, where `setQueryData` needs the query's exact key — so
+   * it silently wrote nothing; and even with the right key, relying on a re-render and an
+   * effect to land between two clicks 30ms apart is a race, not a fix.
+   *
+   * So a ref holds the intent: seeded from settings the moment they first arrive, and after
+   * that only ever changed by a toggle. Nothing else in the app writes these two fields, so
+   * there is nothing for it to drift from, and a click reads a value that no round trip can be
+   * in the middle of.
    */
-  const settingsKey = orpc.app.settings.get.key()
-  const toggleSetting = (field: 'showGrid' | 'snapToGuides', next: boolean): void => {
-    queryClient.setQueryData(settingsKey, (current: AppSettings | undefined) =>
-      current ? { ...current, [field]: next } : current
+  const intentRef = useRef<{ showGrid: boolean; snapToGuides: boolean } | null>(null)
+  /*
+   * Re-seeded from settings whenever nothing is in flight.
+   *
+   * Seeding once and never again made the intent authoritative — which is what a rapid
+   * double-click needs — but also made it drift: anything that changed these fields elsewhere
+   * left the ref describing a state that no longer existed, and the next click toggled from the
+   * wrong base. Re-seeding only while no patch is pending keeps both properties: during a burst
+   * of clicks the ref leads, and once the dust settles it agrees with what is stored.
+   */
+  useEffect(() => {
+    if (!settings.data || patchSettings.isPending) return
+    intentRef.current = {
+      showGrid: settings.data.showGrid,
+      snapToGuides: settings.data.snapToGuides
+    }
+  }, [settings.data, patchSettings.isPending])
+
+  const toggleSetting = (field: 'showGrid' | 'snapToGuides'): void => {
+    const intent = intentRef.current ?? { showGrid, snapToGuides: snap }
+    const next = !intent[field]
+    intentRef.current = { ...intent, [field]: next }
+
+    // Written into the cache as well, so the toolbar and the canvas reflect the click
+    // immediately instead of after the round trip. The exact key, not `.key()`.
+    queryClient.setQueryData(
+      orpc.app.settings.get.queryOptions().queryKey,
+      (current: AppSettings | undefined) => (current ? { ...current, [field]: next } : current)
     )
     patchSettings.mutate({ [field]: next })
   }
 
-  const showGridRef = useRef(showGrid)
-  const snapRef = useRef(snap)
-  useEffect(() => {
-    showGridRef.current = showGrid
-    snapRef.current = snap
-  }, [showGrid, snap])
-
-  const toggleGrid = (): void => toggleSetting('showGrid', !showGridRef.current)
-  const toggleSnap = (): void => toggleSetting('snapToGuides', !snapRef.current)
+  const toggleGrid = (): void => toggleSetting('showGrid')
+  const toggleSnap = (): void => toggleSetting('snapToGuides')
 
   /**
    * One renderer per canvas element, created by a ref callback rather than an
@@ -1190,6 +1230,49 @@ export function LayoutCanvas(): ReactNode {
     setInteractionTick((value) => value + 1)
   }
   fitRef.current = fitToLayout
+
+  /*
+   * Restore this tab's camera, or fit the layout the first time it is seen.
+   *
+   * In an effect rather than during render because it draws, and keyed on the document id so
+   * switching tabs is what triggers it. Saving the outgoing camera happens here too, on
+   * cleanup, which is the only moment that reliably still knows which document it belonged
+   * to.
+   */
+  useEffect(() => {
+    const documentId = tab?.documentId
+    if (!documentId) return
+
+    const remembered = camerasRef.current.get(documentId)
+    if (remembered) {
+      cameraRef.current.x = remembered.x
+      cameraRef.current.y = remembered.y
+      cameraRef.current.zoom = remembered.zoom
+      draw()
+      setInteractionTick((value) => value + 1)
+    } else {
+      // Never seen: frame it, which beats inheriting whatever the last document was at.
+      fitRef.current?.()
+    }
+
+    return () => {
+      const { x, y, zoom } = cameraRef.current
+      camerasRef.current.set(documentId, { x, y, zoom })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab?.documentId])
+
+  /*
+   * Forget a camera once its tab is gone, so reopening the file frames it again rather than
+   * restoring a viewport from a session the user has finished with — and so the map cannot
+   * grow for the life of the process.
+   */
+  useEffect(() => {
+    const live = new Set(tabIds.split('|'))
+    for (const id of [...camerasRef.current.keys()]) {
+      if (!live.has(id)) camerasRef.current.delete(id)
+    }
+  }, [tabIds])
 
   if (!tab) {
     return (

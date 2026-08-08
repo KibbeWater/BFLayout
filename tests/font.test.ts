@@ -1,23 +1,41 @@
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import { FormatParseError } from '@shared/binary/errors'
 import { decodeBfttf, isBfcpx, isBfttf, parseBfcpx } from '@shared/formats/font'
 
-import vectors from './fixtures/font-vectors.json'
-
 /**
- * Real files, not synthesised ones.
+ * Real files, not synthesised ones — which is why these tests are conditional.
  *
- * A synthesised BFTTF would only prove the decoder is self-consistent — and the whole
- * question here is whether the XOR key is right, which self-consistency cannot answer. So
- * the fixture carries the smallest face and the smallest descriptor from a shipped font
- * archive, and the assertions are the two independent invariants that identify the key: a
- * valid sfnt signature, and a declared length matching the payload.
+ * A synthesised BFTTF would only prove the decoder is self-consistent, and the whole question
+ * here is whether the XOR key is right, which self-consistency cannot answer. So the fixture
+ * carries the smallest face and the smallest descriptor from a shipped font archive, and the
+ * assertions are the two independent invariants that identify the key: a valid sfnt signature,
+ * and a declared length matching the payload.
+ *
+ * Those are real game files, so the fixture is **not committed** — `.gitignore` forbids it and
+ * that rule is right. Generate it from a dump with:
+ *
+ *     pnpm fixture:font /path/to/romfs/Font/Font.Nin_NX_NVN.bfarc.zs
+ *
+ * Without it these skip rather than fail, the same arrangement `fixtures.test.ts` uses for
+ * `BFLAYOUT_FIXTURES`. A static import instead made a fresh clone fail to typecheck at all.
  */
-const face = (): Uint8Array => Uint8Array.from(Buffer.from(vectors.face.base64, 'base64'))
-const complex = (): Uint8Array => Uint8Array.from(Buffer.from(vectors.complex.base64, 'base64'))
+interface FontVectors {
+  face: { name: string; base64: string }
+  complex: { name: string; base64: string }
+}
 
-describe('bfttf detection', () => {
+const vectorPath = join(__dirname, 'fixtures', 'font-vectors.json')
+const vectors: FontVectors | null = existsSync(vectorPath)
+  ? (JSON.parse(readFileSync(vectorPath, 'utf8')) as FontVectors)
+  : null
+
+const face = (): Uint8Array => Uint8Array.from(Buffer.from(vectors!.face.base64, 'base64'))
+const complex = (): Uint8Array => Uint8Array.from(Buffer.from(vectors!.complex.base64, 'base64'))
+
+describe.skipIf(!vectors)('bfttf detection', () => {
   it('recognises a real face', () => {
     expect(isBfttf(face())).toBe(true)
   })
@@ -31,7 +49,7 @@ describe('bfttf detection', () => {
   })
 })
 
-describe('bfttf decoding', () => {
+describe.skipIf(!vectors)('bfttf decoding', () => {
   it('produces a font with a valid signature', () => {
     const decoded = decodeBfttf(face())
     expect(decoded.kind).toBe('otf')
@@ -85,7 +103,7 @@ describe('bfttf decoding', () => {
   })
 })
 
-describe('bfcpx font complexes', () => {
+describe.skipIf(!vectors)('bfcpx font complexes', () => {
   it('recognises a real descriptor', () => {
     expect(isBfcpx(complex())).toBe(true)
     expect(isBfcpx(face())).toBe(false)

@@ -24,6 +24,27 @@ import { getUnsavedCount } from './unsaved'
  * than at the quoting, which is a confusing way to spend ten minutes. Write plain prose in
  * these scripts and quote identifiers with single quotes.
  */
+/**
+ * Commits a field the way a blur does, without depending on the window having OS focus.
+ *
+ * Injected once and used by every check that types into a field. `element.blur()` alone was
+ * silently conditional: Chromium suppresses focus and blur events for a document that does not
+ * have OS focus, so with the terminal frontmost — which is normal when running this from a
+ * script — the blur never reached React, `commit()` never ran, and five checks failed for a
+ * reason that had nothing to do with the code they were testing. They passed whenever the app
+ * window happened to be frontmost, which is the worst kind of test.
+ *
+ * React listens for `focusout`, not `blur`, so dispatching that explicitly is what actually
+ * drives the commit. `blur()` is still called first so `document.activeElement` moves too.
+ */
+const COMMIT_FIELD_HELPER = `(() => {
+  window.__bfCommitField = (element) => {
+    element.blur()
+    element.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }))
+  }
+  // Nothing returned: executeJavaScript serialises the result, and a function cannot cross.
+})()`
+
 export function runSelfTest(win: BrowserWindow): void {
   if (app.isPackaged) return
 
@@ -33,6 +54,8 @@ export function runSelfTest(win: BrowserWindow): void {
 
   win.webContents.once('did-finish-load', () => {
     void (async () => {
+      // Installed before any check runs; see COMMIT_FIELD_HELPER for why it exists.
+      await win.webContents.executeJavaScript(COMMIT_FIELD_HELPER)
       const existingPath = JSON.stringify(app.getPath('exe'))
       const archivePath = JSON.stringify(process.env['BFLAYOUT_SELFTEST_ARCHIVE'] ?? '')
 
@@ -954,6 +977,55 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   )
 
   /*
+   * Two quick toggles have to land on two different states.
+   *
+   * These live in settings, and `patch` only changes what the query reports after the mutation
+   * lands and the query refetches — so without an optimistic write both clicks read the same
+   * value and both wrote the same one. The optimistic write was itself a no-op for a while,
+   * because the key used for it was the partial-match `.key()` rather than the query's own,
+   * which is invisible unless something actually clicks twice quickly.
+   */
+  const doubleToggle = (await win.webContents.executeJavaScript(`(async () => {
+    const c = window.__bfclient
+    const button = [...document.querySelectorAll('button')]
+      .find(b => (b.getAttribute('title') || '').toLowerCase().includes('grid'))
+    if (!button) return { skipped: 'no grid toggle in the toolbar' }
+
+    /*
+     * The baseline is established *through the button*, and only then read.
+     *
+     * An earlier version patched settings over RPC first and expected the toolbar to know —
+     * but nothing invalidates the settings query when something writes behind the UI's back,
+     * so the component was working from an older value and the check was measuring its own
+     * interference rather than the behaviour.
+     */
+    button.click()
+    await new Promise(r => setTimeout(r, 900))
+    const base = (await c.app.settings.get()).showGrid
+
+    /*
+     * Back to back in one task, with no await between them — the second click therefore runs
+     * before React has re-rendered, let alone before any round trip. That is the only version
+     * of this that is actually sensitive: with even a 30ms gap the local RPC lands first and
+     * the second click reads a fresh value regardless of whether the intent tracking works.
+     */
+    button.click()
+    button.click()
+    await new Promise(r => setTimeout(r, 900))
+
+    return { base, after: (await c.app.settings.get()).showGrid }
+  })()`)) as { skipped?: string; base?: boolean; after?: boolean }
+
+  if (doubleToggle.skipped) {
+    out.push(`SKIP double grid toggle (${doubleToggle.skipped})`)
+  } else {
+    check(
+      doubleToggle.after === doubleToggle.base,
+      `two quick grid toggles cancel out rather than losing one (${doubleToggle.base} -> ${doubleToggle.after})`
+    )
+  }
+
+  /*
    * The properties panel acts on the whole selection.
    *
    * It used to edit only the first selected pane, which made the marquee, shift-click,
@@ -1010,7 +1082,7 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     setter.call(input, '123')
     input.dispatchEvent(new Event('input', { bubbles: true }))
     input.dispatchEvent(new Event('change', { bubbles: true }))
-    input.blur()
+    window.__bfCommitField(input)
     await new Promise(r => setTimeout(r, 450))
 
     const after = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
@@ -1138,6 +1210,114 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
         closeArchive.refused === true,
         'the Close button refuses while a layout from that archive is open'
       )
+    }
+  }
+
+  /*
+   * Each tab keeps its own camera.
+   *
+   * The canvas stays mounted across tab switches, so one camera was shared by every document:
+   * zoom into a corner of one layout, switch to another, and the second appeared to be missing
+   * — it was off-screen at the first one's magnification. Layouts also differ in authored size
+   * by an order of magnitude, so even without panning the zoom was wrong for the next one.
+   */
+  const cameras = (await win.webContents.executeJavaScript(`(async () => {
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    if (store.tabs.length < 1) return { error: 'no tab' }
+
+    const zoomOf = () => {
+      const readout = [...document.querySelectorAll('button')]
+        .map(b => b.textContent.trim())
+        .find(t => /^[0-9]+%$/.test(t))
+      return readout ? Number(readout.replace('%', '')) : null
+    }
+
+    const first = store.tabs[0]
+    store.setActive(first.documentId)
+    await new Promise(r => setTimeout(r, 500))
+    const fitted = zoomOf()
+
+    // Zoom in hard on the first tab, the way someone working on a detail would.
+    const canvases = [...document.querySelectorAll('canvas')]
+    const surface = canvases.sort(
+      (a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width
+    )[0]
+    const container = surface && surface.parentElement
+    if (!container) return { skipped: 'no canvas container' }
+    const box = surface.getBoundingClientRect()
+    for (let i = 0; i < 8; i++) {
+      container.dispatchEvent(new WheelEvent('wheel', {
+        clientX: box.left + 20, clientY: box.top + 20,
+        deltaY: -120, ctrlKey: true, bubbles: true, cancelable: true
+      }))
+    }
+    await new Promise(r => setTimeout(r, 400))
+    const zoomed = zoomOf()
+
+    // A second tab on another document, which must be framed rather than inherit that zoom.
+    const second = store.tabs.find(t => t.documentId !== first.documentId)
+    let secondZoom = null
+    if (second) {
+      dev.documents.getState().setActive(second.documentId)
+      await new Promise(r => setTimeout(r, 500))
+      secondZoom = zoomOf()
+    }
+
+    // Back to the first: its own zoom has to come back.
+    dev.documents.getState().setActive(first.documentId)
+    await new Promise(r => setTimeout(r, 500))
+    const restored = zoomOf()
+
+    /*
+     * Framed again before leaving. Later checks click panes and read field positions, and an
+     * 800% camera left behind put all of that off-screen — five of them failed for reasons
+     * that had nothing to do with what they were testing.
+     */
+    window.dispatchEvent(new CustomEvent('bflayout-command', { detail: 'fit' }))
+    await new Promise(r => setTimeout(r, 400))
+
+    return { fitted, zoomed, secondZoom, restored, hadSecond: !!second, left: zoomOf() }
+  })()`)) as {
+    error?: string
+    skipped?: string
+    fitted?: number | null
+    zoomed?: number | null
+    secondZoom?: number | null
+    restored?: number | null
+    hadSecond?: boolean
+    left?: number | null
+  }
+
+  if (cameras.error) {
+    check(false, `per-tab camera: ${cameras.error}`)
+  } else if (cameras.skipped) {
+    out.push(`SKIP per-tab camera (${cameras.skipped})`)
+  } else {
+    check(
+      (cameras.fitted ?? 0) > 0,
+      `opening a layout framed it rather than inheriting a zoom (${cameras.fitted}%)`
+    )
+    check(
+      (cameras.zoomed ?? 0) > (cameras.fitted ?? 0),
+      `zooming in changed the camera (${cameras.fitted}% -> ${cameras.zoomed}%)`
+    )
+    check(
+      cameras.restored === cameras.zoomed,
+      `switching away and back restored the tab's own camera (${cameras.restored}% vs ${cameras.zoomed}%)`
+    )
+    // The canvas has to be usable for everything after this.
+    check(
+      cameras.left === cameras.fitted,
+      `the canvas was framed again before moving on (${cameras.left}%)`
+    )
+    if (cameras.hadSecond) {
+      check(
+        cameras.secondZoom !== cameras.zoomed,
+        `a different tab got its own camera rather than the previous one's (${cameras.secondZoom}% vs ${cameras.zoomed}%)`
+      )
+    } else {
+      out.push('SKIP second-tab camera (only one document open)')
     }
   }
 
@@ -2588,7 +2768,7 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     const warned = !!document.querySelector('aside [aria-invalid="true"]')
 
     input.focus()
-    input.blur()
+    window.__bfCommitField(input)
     await new Promise(r => setTimeout(r, 300))
 
     const now = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)
@@ -2663,7 +2843,7 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     // React listens for focusout, not blur, so a synthetic 'blur' never reaches
     // onBlur. Driving the real thing does.
     input.focus()
-    input.blur()
+    window.__bfCommitField(input)
     await new Promise(r => setTimeout(r, 350))
 
     const now = dev.documents.getState().tabs.find(t => t.documentId === store.activeId)

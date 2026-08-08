@@ -1135,7 +1135,14 @@ function TextField({
         value={draft ?? value}
         maxLength={maxLength}
         aria-invalid={problem !== null}
-        onChange={(event) => setDraft(event.target.value)}
+        onChange={(event) => {
+          // Any new keystroke means the field is live again. Without this, an Escape whose
+          // blur never arrived — which happens whenever the window is not frontmost, since
+          // the browser suppresses focus events for an unfocused document — left the latch
+          // set and silently swallowed the *next* commit.
+          cancelling.current = false
+          setDraft(event.target.value)
+        }}
         onBlur={(event) => commit(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === 'Enter') {
@@ -1274,7 +1281,14 @@ function NumberField({
         value={draft ?? (Number.isFinite(value) ? value : 0)}
         step={step}
         title={mixed ? 'The selected panes differ; editing sets them all' : undefined}
-        onChange={(event) => setDraft(event.target.value)}
+        onChange={(event) => {
+          // Any new keystroke means the field is live again. Without this, an Escape whose
+          // blur never arrived — which happens whenever the window is not frontmost, since
+          // the browser suppresses focus events for an unfocused document — left the latch
+          // set and silently swallowed the *next* commit.
+          cancelling.current = false
+          setDraft(event.target.value)
+        }}
         onBlur={(event) => commit(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === 'Enter') {
