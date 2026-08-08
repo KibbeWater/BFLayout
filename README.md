@@ -365,6 +365,27 @@ pane's number while eleven others hold something else invites an overwrite nobod
 The kind-specific fields below do not carry the marker yet; they apply only to panes sharing
 the active pane's kind, which is a smaller set to be surprised by.
 
+### Closing an archive is a button, not a heuristic
+
+Nothing used to close an archive at all, so every one opened stayed open for the session. That
+is worse than a leak: resolving a texture searches the layout's own archive and then **every
+other open one** — a deliberate feature, since layouts routinely reference a shared texture
+archive opened separately — so the list only grew, lookups got slower, and a stale archive
+could keep answering with a same-named texture.
+
+Reclaiming them automatically was implemented and then reverted, which is the part worth
+recording. "Referenced" is not knowable from the inside: an archive opened *so that its
+textures resolve* has no tab, is not the archive being browsed, and is not the loaded
+animation — it looks exactly like an abandoned one. So a sweep silently un-textured panes, and
+because the session snapshot is rebuilt from the list of open archives it also rewrote the
+saved session to drop that archive for good. Restore would have quietly degraded its own
+snapshot.
+
+So it is an explicit **Close** in the archive browser, which refuses while the archive has
+unsaved changes or while any open tab holds a layout from it — that tab's save writes its
+re-encoded entry back into this in-memory archive, and save-as is not available for an
+archive-backed layout. A button cannot be wrong about intent.
+
 ### Where a keystroke goes
 
 Three things that all looked fine and were not:
