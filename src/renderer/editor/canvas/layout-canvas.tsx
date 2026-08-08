@@ -54,6 +54,17 @@ import { LayoutRenderer, type Camera } from './renderer'
  * Arrow keys to a layout-space delta. Y is negated because layout space puts +Y
  * upwards while the keys mean screen directions.
  */
+/** The zoom range the camera is allowed to take, wherever it is set from. */
+const MIN_ZOOM = 0.02
+const MAX_ZOOM = 8
+
+function clampZoom(value: number): number {
+  // A zero-sized container makes the fit calculation NaN, which would blank the
+  // canvas with no indication why.
+  if (!Number.isFinite(value) || value <= 0) return MIN_ZOOM
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value))
+}
+
 const NUDGE_KEYS: Record<string, readonly [number, number]> = {
   ArrowLeft: [-1, 0],
   ArrowRight: [1, 0],
@@ -756,7 +767,7 @@ export function LayoutCanvas(): ReactNode {
     if (event.ctrlKey || event.metaKey) {
       const before = toLayout(event.clientX, event.clientY)
       const factor = Math.exp(-event.deltaY * 0.01)
-      camera.zoom = Math.min(8, Math.max(0.02, camera.zoom * factor))
+      camera.zoom = clampZoom(camera.zoom * factor)
       const after = toLayout(event.clientX, event.clientY)
       // Keep the point under the cursor fixed while zooming.
       camera.x += before[0] - after[0]
@@ -783,9 +794,13 @@ export function LayoutCanvas(): ReactNode {
     camera.x = 0
     camera.y = 0
     const margin = 1.1
-    camera.zoom = Math.min(
-      rect.width / (tab.document.info.width * margin),
-      rect.height / (tab.document.info.height * margin)
+    // Clamped to the same range the wheel enforces: a tiny container or a huge
+    // authored canvas could otherwise fit to a zoom the rest of the code rejects.
+    camera.zoom = clampZoom(
+      Math.min(
+        rect.width / (tab.document.info.width * margin),
+        rect.height / (tab.document.info.height * margin)
+      )
     )
     draw()
   }
@@ -808,6 +823,19 @@ export function LayoutCanvas(): ReactNode {
         <p className="max-w-md text-xs text-muted-foreground/70">
           The hierarchy and property panels still work, so the layout remains editable.
         </p>
+        {/*
+          Clearing the error unmounts this screen and remounts the canvas, which
+          runs `attachCanvas` again and builds a fresh renderer. Without it a single
+          transient draw failure — a lost context, a driver hiccup — was permanent
+          for the rest of the session with no way back.
+        */}
+        <button
+          type="button"
+          onClick={() => setGlError(null)}
+          className="rounded border px-2.5 py-1 text-xs hover:bg-accent"
+        >
+          Try again
+        </button>
       </div>
     )
   }

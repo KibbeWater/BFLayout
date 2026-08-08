@@ -31,6 +31,8 @@ const PLACEHOLDER_PIXELS = new Uint8Array([
 ])
 
 export class TextureStore {
+  /** Set by dispose, so in-flight fetches stop touching a dead GL context. */
+  private disposed = false
   private readonly gl: WebGL2RenderingContext
   private readonly onChanged: () => void
   private readonly entries = new Map<string, Entry>()
@@ -112,12 +114,20 @@ export class TextureStore {
 
     try {
       const decoded = await getClient().textures.get({ source, name })
-      // The source can change while a fetch is in flight; a late arrival for the
-      // previous layout must not be uploaded against the current one.
-      if (!sameSource(this.source, source)) return
+      /*
+       * Two things can have happened across the await, and both used to be
+       * mishandled in one direction or the other:
+       *
+       *   - the source changed, so a late arrival for the previous layout must not
+       *     be uploaded against the current one;
+       *   - the store was disposed, in which case the GL context is gone. Uploading
+       *     into it and then calling `onChanged` meant WebGL calls against a dead
+       *     context and a state update into an unmounted component.
+       */
+      if (this.disposed || !sameSource(this.source, source)) return
 
       const rgba = new Uint8Array(await decoded.rgba.arrayBuffer())
-      if (!sameSource(this.source, source)) return
+      if (this.disposed || !sameSource(this.source, source)) return
 
       const texture = this.upload(rgba, decoded.width, decoded.height)
       this.entries.set(name, {
@@ -127,7 +137,7 @@ export class TextureStore {
         detail: null
       })
     } catch (cause) {
-      if (!sameSource(this.source, source)) return
+      if (this.disposed || !sameSource(this.source, source)) return
       this.entries.set(name, {
         state: 'missing',
         texture: null,
@@ -179,6 +189,8 @@ export class TextureStore {
   }
 
   dispose(): void {
+    // Set before anything is deleted, so a fetch resuming mid-teardown stops.
+    this.disposed = true
     this.clearEntries()
     this.gl.deleteTexture(this.white)
     this.gl.deleteTexture(this.placeholder)
