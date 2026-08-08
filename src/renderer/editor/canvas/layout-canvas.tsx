@@ -125,6 +125,38 @@ export function LayoutCanvas(): ReactNode {
   const redo = useDocuments((state) => state.redo)
 
   /**
+   * Holds the newest wheel handler, so the listener below can be registered once
+   * while still calling into the current closure.
+   */
+  const wheelRef = useRef<(event: WheelEvent) => void>(() => {})
+
+  // Stable across renders so the add and remove below always match.
+  const dispatchWheel = useMemo(
+    () =>
+      (event: WheelEvent): void => {
+        wheelRef.current(event)
+      },
+    []
+  )
+
+  /**
+   * Attaches the container and its non-passive wheel listener.
+   *
+   * A ref callback rather than an effect for the same reason `attachCanvas` is:
+   * the element does not exist on the first render when no layout is open, so a
+   * mount-time effect would run against null and never run again.
+   */
+  const attachContainer = useCallback(
+    (node: HTMLDivElement | null) => {
+      const previous = containerRef.current
+      if (previous) previous.removeEventListener('wheel', dispatchWheel)
+      containerRef.current = node
+      if (node) node.addEventListener('wheel', dispatchWheel, { passive: false })
+    },
+    [dispatchWheel]
+  )
+
+  /**
    * Moves every selected pane, as one undo entry.
    *
    * Y is inverted because layout space puts +Y upwards while the arrow keys mean
@@ -695,7 +727,16 @@ export function LayoutCanvas(): ReactNode {
    * mouse wheel held with a modifier, and plain wheel scrolling pans like every
    * other canvas on the platform.
    */
-  const onWheel = (event: React.WheelEvent<HTMLDivElement>): void => {
+  /**
+   * Trackpad and wheel navigation.
+   *
+   * Attached natively rather than through React's `onWheel`, because React
+   * registers wheel listeners as passive: `preventDefault` inside one is ignored,
+   * Chromium logs a warning per event, and Cmd/Ctrl + wheel zooms the whole app
+   * chrome on top of the canvas zoom. It has to be a non-passive listener to stop
+   * that, and only `addEventListener` can ask for one.
+   */
+  const onWheel = (event: WheelEvent): void => {
     event.preventDefault()
     const camera = cameraRef.current
 
@@ -718,6 +759,8 @@ export function LayoutCanvas(): ReactNode {
     camera.y -= dy / camera.zoom
     draw()
   }
+
+  wheelRef.current = onWheel
 
   const fitToLayout = (): void => {
     const container = containerRef.current
@@ -811,13 +854,12 @@ export function LayoutCanvas(): ReactNode {
       </div>
 
       <div
-        ref={containerRef}
+        ref={attachContainer}
         className="relative min-h-0 flex-1 touch-none"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={endInteraction}
         onPointerCancel={endInteraction}
-        onWheel={onWheel}
         onContextMenu={(event) => event.preventDefault()}
       >
         <canvas ref={attachCanvas} className="absolute inset-0 size-full" />
