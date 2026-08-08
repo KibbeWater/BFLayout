@@ -144,12 +144,21 @@ export function flattenPanes(root: Pane | null, lookup?: PaneValueLookup): PaneT
  * Topmost pane containing the point, in layout coordinates. Draw order is
  * back-to-front, so the search runs backwards.
  */
-export function hitTest(
+/**
+ * Every pane under a point, topmost first.
+ *
+ * Needed as well as `hitTest` because shipped layouts routinely put a full-screen
+ * `bnd1` or `pan1` last in the tree, and painter's order makes that the topmost hit
+ * — so "the pane you clicked" is often not the one you meant, and everything beneath
+ * it is unreachable on the canvas without a way to look past it.
+ */
+export function hitTestAll(
   panes: readonly PaneTransform[],
   x: number,
   y: number,
   options?: { includeHidden?: boolean }
-): PaneTransform | null {
+): PaneTransform[] {
+  const hits: PaneTransform[] = []
   for (let i = panes.length - 1; i >= 0; i--) {
     const entry = panes[i]!
     if (!entry.visible && !options?.includeHidden) continue
@@ -159,9 +168,18 @@ export function hitTest(
 
     const [localX, localY] = apply(inverse, x, y)
     const [left, bottom, right, top] = localBounds(entry.pane, entry.values)
-    if (localX >= left && localX <= right && localY >= bottom && localY <= top) return entry
+    if (localX >= left && localX <= right && localY >= bottom && localY <= top) hits.push(entry)
   }
-  return null
+  return hits
+}
+
+export function hitTest(
+  panes: readonly PaneTransform[],
+  x: number,
+  y: number,
+  options?: { includeHidden?: boolean }
+): PaneTransform | null {
+  return hitTestAll(panes, x, y, options)[0] ?? null
 }
 
 /** Axis-aligned bounds of a pane's quad in layout coordinates. */

@@ -8,6 +8,7 @@ import {
   apply,
   flattenPanes,
   hitTest,
+  hitTestAll,
   invert,
   localBounds,
   localTransform,
@@ -189,6 +190,40 @@ describe('hit testing', () => {
   it('misses entirely outside every pane', () => {
     const flat = flattenPanes(overlapping())
     expect(hitTest(flat, 500, 500)).toBeNull()
+  })
+
+  it('lists every pane under a point, topmost first', () => {
+    /*
+     * This is what select-behind walks down. Shipped layouts routinely end with a
+     * full-screen pane, which painter's order makes the only reachable hit — so the
+     * stack is the difference between "everything under here is selectable" and
+     * "nothing under here is".
+     */
+    const flat = flattenPanes(overlapping())
+    const stack = hitTestAll(flat, 0, 0)
+    expect(stack.map((entry) => entry.pane.name)).toEqual(['Front', 'Back', 'Root'])
+  })
+
+  it('agrees with hitTest about the topmost pane', () => {
+    const flat = flattenPanes(overlapping())
+    for (const [x, y] of [
+      [0, 0],
+      [80, 80],
+      [500, 500]
+    ]) {
+      expect(hitTestAll(flat, x!, y!)[0] ?? null).toBe(hitTest(flat, x!, y!))
+    }
+  })
+
+  it('excludes hidden panes from the stack too', () => {
+    const root = overlapping()
+    const front = root.children[1]!
+    front.visible = false
+    const flat = flattenPanes(root)
+    expect(hitTestAll(flat, 0, 0).map((entry) => entry.pane.name)).not.toContain('Front')
+    expect(hitTestAll(flat, 0, 0, { includeHidden: true }).map((entry) => entry.pane.name)).toContain(
+      'Front'
+    )
   })
 
   it('skips hidden panes unless asked to include them', () => {

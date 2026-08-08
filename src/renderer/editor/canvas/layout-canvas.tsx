@@ -15,7 +15,7 @@ import type { LayoutSource } from '@shared/contract'
 import {
   apply,
   flattenPanes,
-  hitTest,
+  hitTestAll,
   invert,
   worldBounds,
   type Affine,
@@ -61,6 +61,12 @@ function clampZoom(value: number): number {
   if (!Number.isFinite(value) || value <= 0) return MIN_ZOOM
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value))
 }
+
+/**
+ * How far, in screen pixels, two clicks can be apart and still count as the same
+ * spot for select-behind. Generous enough to survive an unsteady hand.
+ */
+const CYCLE_TOLERANCE = 4
 
 /**
  * Arrow keys to a layout-space delta. Y is negated because layout space puts +Y
@@ -126,6 +132,11 @@ export function LayoutCanvas(): ReactNode {
   /** Latest fitToLayout, so the menu handler need not depend on it. */
   const fitRef = useRef<(() => void) | null>(null)
   const marqueeRef = useRef<MarqueeState | null>(null)
+  /**
+   * The last click point and how far down the overlapping stack it reached, so a
+   * second click at the same spot selects the pane underneath.
+   */
+  const cycleRef = useRef<{ x: number; y: number; index: number } | null>(null)
 
   const [glError, setGlError] = useState<string | null>(null)
   const [showGrid, setShowGrid] = useState(true)
@@ -567,7 +578,26 @@ export function LayoutCanvas(): ReactNode {
     }
 
     const additive = event.shiftKey || event.metaKey || event.ctrlKey
-    const hit = hitTest(renderer.flattened, x, y, { includeHidden: showInvisible })
+
+    /*
+     * Clicking the same spot again reaches the pane underneath.
+     *
+     * Painter's order makes the topmost pane the hit, and shipped layouts routinely
+     * end with a full-screen bnd1 or pan1 — which then swallows every click and makes
+     * everything beneath it unselectable on the canvas. Repeated clicks at the same
+     * point walk down the stack instead, wrapping at the bottom, which is how
+     * select-behind works in editors that have it.
+     */
+    const stack = hitTestAll(renderer.flattened, x, y, { includeHidden: showInvisible })
+    const previous = cycleRef.current
+    const samePoint =
+      previous !== null &&
+      Math.abs(previous.x - x) <= CYCLE_TOLERANCE / cameraRef.current.zoom &&
+      Math.abs(previous.y - y) <= CYCLE_TOLERANCE / cameraRef.current.zoom
+    const index = samePoint && stack.length > 1 ? (previous.index + 1) % stack.length : 0
+    cycleRef.current = stack.length > 0 ? { x, y, index } : null
+
+    const hit = stack[index] ?? null
 
     if (!hit) {
       // Empty space starts a marquee. The selection is only cleared once the drag

@@ -59,9 +59,15 @@ this, and what the remaining 0.9% is.
 | ⌘F | Fit the layout to the view |
 | Alt while dragging | Suspend grid snapping and alignment guides |
 | Two-finger scroll | Pan; pinch or ⌘-scroll zooms at the cursor |
+| Click the same spot again | Select the pane *behind* the one you just got |
 
-Nudge and delete act on the whole selection as **one** undo entry, so a
+Nudge, delete and duplicate act on the whole selection as **one** undo entry, so a
 twenty-pane drag is one press of ⌘Z rather than twenty.
+
+Select-behind exists because painter's order makes the topmost pane the only hit, and
+shipped layouts routinely end with a full-screen `bnd1` or `pan1` — which then
+swallows every click. Clicking the same spot repeatedly walks down the stack and
+wraps at the bottom.
 
 ## Requirements
 
