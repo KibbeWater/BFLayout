@@ -1,6 +1,8 @@
 import { readFile, writeFile } from 'node:fs/promises'
-import { app, type BrowserWindow } from 'electron'
+import { inflateSync } from 'node:zlib'
+import { app, nativeImage, type BrowserWindow } from 'electron'
 
+import { premultipliedBgra } from './services/textures'
 import { getUnsavedCount } from './unsaved'
 
 /**
@@ -1119,6 +1121,38 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   } else {
     check(saveRace.staleIgnored === true, 'a save built from a stale revision leaves the tab unsaved')
     check(saveRace.current === false, 'a save built from the current revision clears the flag')
+  }
+
+  /*
+   * What `nativeImage.createFromBitmap` actually expects for a translucent pixel.
+   *
+   * It takes Chromium's native N32 bitmap, which is documented as *premultiplied* BGRA,
+   * while every decoder here produces straight alpha. If that is right, exporting a UI
+   * texture with any translucency shifts its colours — and the checks below would not
+   * notice, since a PNG signature and a byte count say nothing about pixels.
+   *
+   * So: encode a known grey at half alpha and read it back. Grey 128 at alpha 128 is the
+   * decisive value — read as premultiplied it unpremultiplies to 256 and clamps to 255,
+   * read as straight it comes back as 128. Whichever it is, `exportPng` has to match.
+   */
+  {
+    // Straight-alpha RGBA in, through the same conversion exportPng uses.
+    const straight = new Uint8Array([128, 128, 128, 128])
+    const image = nativeImage.createFromBitmap(Buffer.from(premultipliedBgra(straight)), {
+      width: 1,
+      height: 1
+    })
+    /*
+     * Read from the PNG's own bytes, not from a round trip through nativeImage: PNG
+     * stores straight alpha by spec, so the file says which convention went in. Feeding
+     * it back through `createFromBuffer` would apply the same convention on the way out
+     * and cancel exactly the error being looked for.
+     */
+    const pixel = firstPngPixel(image.toPNG())
+    check(
+      pixel.join(',') === '128,128,128,128',
+      `a translucent texel survives PNG export (${pixel.join(',')} for grey 128 at alpha 128)`
+    )
   }
 
   /*
@@ -2508,4 +2542,29 @@ async function findBc7Samples(root: string, want: number): Promise<Bc7Sample[]> 
     `${readFailures} unreadable, ${deswizzleFailures} deswizzle failures, ` +
     `${samples.length} sampled`
   return samples
+}
+
+/**
+ * The first pixel of a 1x1 RGBA PNG, straight from the file.
+ *
+ * Just enough PNG to answer one question — is what nativeImage wrote premultiplied? —
+ * without a dependency. Only the first IDAT of a single-row image is handled, which is
+ * all a 1x1 probe produces.
+ */
+function firstPngPixel(png: Buffer): number[] {
+  // Every IDAT concatenated: the zlib stream is allowed to be split across chunks, and
+  // inflating only the first one fails with Z_BUF_ERROR on a truncated stream.
+  const parts: Buffer[] = []
+  let at = 8
+  while (at + 8 <= png.length) {
+    const length = png.readUInt32BE(at)
+    const type = png.toString('ascii', at + 4, at + 8)
+    if (type === 'IDAT') parts.push(png.subarray(at + 8, at + 8 + length))
+    if (type === 'IEND') break
+    at += length + 12
+  }
+  if (parts.length === 0) return []
+  const raw = inflateSync(Buffer.concat(parts))
+  // Byte 0 of each row is the filter type; a 1x1 image cannot reference neighbours.
+  return [...raw.subarray(1, 5)]
 }

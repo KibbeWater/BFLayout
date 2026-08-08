@@ -273,6 +273,16 @@ close, a full layout open → edit → save → reopen cycle, and the texture pi
 end to end — then drives the real editor UI, confirms every referenced texture
 reached the GPU, and exits non-zero if anything failed.
 
+Several checks exist because the obvious version of the test passed while the
+feature was broken. The context menu is pressed with a real `pointerdown` before
+the click, since a bare `.click()` never triggered the dismiss listener that used
+to close the menu before any item could fire. PNG export is verified by inflating
+the file's own IDAT rather than by checking its signature, because
+`nativeImage.createFromBitmap` wants *premultiplied* BGRA and a signature check
+cannot tell a correct pixel from a washed-out one. And recovery is proved by
+serializing the restored document, which is the step that fails when a recovered
+tab has no main-process session behind it.
+
 Add `BFLAYOUT_SELFTEST_SHOT=/tmp/shot.png` to also capture the window, which is
 the only way to check what the GL canvas actually drew: the context runs without
 `preserveDrawingBuffer`, so `toDataURL` and `readPixels` both come back blank.

@@ -373,13 +373,7 @@ export class TextureService extends Effect.Service<TextureService>()('TextureSer
         const decodedTexture = yield* get(source, name, mip)
         const rgba = new Uint8Array(yield* blobBytes(decodedTexture.rgba))
 
-        const bgra = new Uint8Array(rgba.length)
-        for (let i = 0; i < rgba.length; i += 4) {
-          bgra[i] = rgba[i + 2]!
-          bgra[i + 1] = rgba[i + 1]!
-          bgra[i + 2] = rgba[i]!
-          bgra[i + 3] = rgba[i + 3]!
-        }
+        const bgra = premultipliedBgra(rgba)
 
         const png = yield* Effect.try({
           try: () => {
@@ -422,3 +416,36 @@ export class TextureService extends Effect.Service<TextureService>()('TextureSer
     return { list, get, exportPng } as const
   })
 }) {}
+
+/**
+ * Straight-alpha RGBA to the premultiplied BGRA `nativeImage.createFromBitmap` wants.
+ *
+ * Both halves of that are needed and neither is obvious. The channel order is Chromium's
+ * native N32 bitmap layout on little-endian; the premultiplication is because that layout
+ * is premultiplied, while every decoder here produces straight alpha.
+ *
+ * Measured, not assumed: handing `createFromBitmap` a straight-alpha grey 128 at alpha 128
+ * and inflating the PNG it produced gave 255,255,255,128 — the encoder's unpremultiply
+ * pass divided by the alpha and clamped. Fully opaque textures came out right, which is
+ * why a signature-and-size check never noticed, but anything translucent — most UI art —
+ * was exported with its colours pushed toward white.
+ */
+export function premultipliedBgra(rgba: Uint8Array): Uint8Array {
+  const out = new Uint8Array(rgba.length)
+  for (let i = 0; i < rgba.length; i += 4) {
+    const alpha = rgba[i + 3]!
+    // The opaque case is exact and by far the most common, so it skips the arithmetic.
+    if (alpha === 255) {
+      out[i] = rgba[i + 2]!
+      out[i + 1] = rgba[i + 1]!
+      out[i + 2] = rgba[i]!
+      out[i + 3] = 255
+      continue
+    }
+    out[i] = Math.round((rgba[i + 2]! * alpha) / 255)
+    out[i + 1] = Math.round((rgba[i + 1]! * alpha) / 255)
+    out[i + 2] = Math.round((rgba[i]! * alpha) / 255)
+    out[i + 3] = alpha
+  }
+  return out
+}
