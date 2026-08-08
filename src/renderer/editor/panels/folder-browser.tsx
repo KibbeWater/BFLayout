@@ -28,6 +28,7 @@ import { describeError } from '@renderer/lib/errors'
 import { reportError, reportSuccess } from '@renderer/lib/toast'
 import { useOpenFile } from '@renderer/lib/use-open-file'
 import { useFolder } from '@renderer/editor/store/folder'
+import { useRememberedScroll } from '@renderer/lib/use-remembered-scroll'
 import { WindowedList } from '@renderer/components/windowed-list'
 
 /**
@@ -107,12 +108,30 @@ export function FolderBrowser(): ReactNode {
         the viewport height. Tree mode still scrolls in a plain container.
       */}
       {mode === 'tree' ? (
-        <div className="min-h-0 flex-1 overflow-auto p-1">
-          <DirectoryNode path={root} depth={0} defaultOpen />
-        </div>
+        <TreeScroller path={root} />
       ) : (
         <FlatList path={root} />
       )}
+    </div>
+  )
+}
+
+/**
+ * Tree mode's scroll container, split out so it can remember where it was.
+ *
+ * A tab switch unmounts the browser, and the scroll position goes with the DOM node — which, once
+ * expansion and filters survived, left the tree open at the right place while showing the top of it.
+ */
+function TreeScroller({ path }: { path: string }): ReactNode {
+  const scroll = useRememberedScroll(`tree:${path}`)
+
+  return (
+    <div
+      ref={scroll.ref}
+      onScroll={scroll.onScroll}
+      className="min-h-0 flex-1 overflow-auto p-1"
+    >
+      <DirectoryNode path={path} depth={0} defaultOpen />
     </div>
   )
 }
@@ -343,6 +362,8 @@ function FlatList({ path }: { path: string }): ReactNode {
   const setFilterFor = useFolder((state) => state.setFilter)
   const filter = filters[path] ?? ''
   const setFilter = (value: string): void => setFilterFor(path, value)
+  // Keyed by mode as well as path: the tree and the list scroll independently over one directory.
+  const scroll = useRememberedScroll(`list:${path}`)
   const query = useQuery(orpc.folder.list.queryOptions({ input: { path } }))
 
   if (query.isError) {
@@ -396,6 +417,8 @@ function FlatList({ path }: { path: string }): ReactNode {
       rowHeight={FLAT_ROW_HEIGHT}
       header={header}
       className="min-h-0 flex-1 overflow-auto p-1"
+      scrollRef={scroll.ref}
+      onScrollChange={(top) => scroll.onScroll({ currentTarget: { scrollTop: top } })}
       keyOf={(entry) => entry.path}
       renderRow={(entry) =>
         entry.kind === 'directory' ? (

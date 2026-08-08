@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useHotkeys } from '@tanstack/react-hotkeys'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
@@ -248,6 +249,12 @@ export function LayoutCanvas(): ReactNode {
   const wheelRef = useRef<(event: WheelEvent) => void>(() => {})
 
   // Stable across renders so the add and remove below always match.
+  /** The live selection, for a hotkey callback that must not close over a stale render. */
+  const currentSelection = (): string[] => {
+    const state = useDocuments.getState()
+    return state.tabs.find((entry) => entry.documentId === state.activeId)?.selectedPaneIds ?? []
+  }
+
   const dispatchWheel = useMemo(
     () =>
       (event: WheelEvent): void => {
@@ -437,20 +444,48 @@ export function LayoutCanvas(): ReactNode {
     state.select([])
   }, [])
 
+  /*
+   * The discrete shortcuts, through TanStack Hotkeys.
+   *
+   * `Mod` resolves to Command on macOS and Control everywhere else, which replaces a hand-rolled
+   * `event.metaKey || event.ctrlKey` that was correct only by coincidence — it fired on Ctrl+Z on a
+   * Mac too, where that is not the shortcut. `ignoreInputs` is the same focus guard the raw handler
+   * below applies by hand, done by the library.
+   *
+   * The arrow-key nudges stay in the raw handler: they are continuous, modifier-sensitive movement
+   * with Shift and Alt changing what the key means, which is a keydown handler's job rather than a
+   * table of bindings.
+   */
+  useHotkeys(
+    [
+      { hotkey: 'Mod+Z', callback: () => undo() },
+      { hotkey: 'Mod+Shift+Z', callback: () => redo() },
+      { hotkey: 'Mod+D', callback: () => duplicateSelection(currentSelection()) },
+      {
+        hotkey: 'Mod+A',
+        callback: () => {
+          // Select-all was missing entirely, which is odd in an editor with marquee select.
+          const state = useDocuments.getState()
+          const tab = state.tabs.find((entry) => entry.documentId === state.activeId)
+          if (!tab?.document.rootPane) return
+          const ids: string[] = []
+          walkPanes(tab.document.rootPane, (pane) => {
+            if (pane.id !== tab.document.rootPane?.id) ids.push(pane.id)
+          })
+          state.select(ids)
+        }
+      }
+    ],
+    { ignoreInputs: true, preventDefault: true }
+  )
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null
       // Keep out of anything the user is typing into: arrow keys would become pane
-      // nudges and Backspace a deletion while someone edits a name. Shared with the
-      // native menu commands, which have to answer the same question.
+      // nudges and Backspace a deletion while someone edits a name. The discrete shortcuts
+      // above get the same guard from the library's `ignoreInputs`.
       if (isTypingTarget(target)) return
-
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
-        event.preventDefault()
-        if (event.shiftKey) redo()
-        else undo()
-        return
-      }
 
       const state = useDocuments.getState()
       const tab = state.tabs.find((entry) => entry.documentId === state.activeId)
@@ -471,12 +506,6 @@ export function LayoutCanvas(): ReactNode {
       if (event.key === 'Delete' || event.key === 'Backspace') {
         event.preventDefault()
         deleteSelection(selection)
-        return
-      }
-
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'd') {
-        event.preventDefault()
-        duplicateSelection(selection)
         return
       }
 

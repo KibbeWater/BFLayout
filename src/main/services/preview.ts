@@ -12,6 +12,7 @@ import {
   type AampParameter,
   type AampValue
 } from '@shared/formats/aamp'
+import { isAinb, parseAinb, type AinbValueCounts } from '@shared/formats/ainb'
 import { isBfres, parseBfres } from '@shared/formats/bfres'
 import {
   bwavChannelCount,
@@ -56,6 +57,9 @@ const MESSAGE_LIMIT = 2000
 
 /** Same reasoning for parameter nodes: one archive can hold thousands. */
 const PARAMETER_LIMIT = 3000
+
+/** And for logic nodes: the largest graph in the dump holds a few thousand. */
+const NODE_LIMIT = 2000
 
 /** Faces and complexes found in a font archive, or a single loose face. */
 interface FontContent {
@@ -312,6 +316,59 @@ export class PreviewService extends Effect.Service<PreviewService>()('PreviewSer
           })
         }
 
+        if (isAinb(data)) {
+          const logic = yield* Effect.orElseSucceed(
+            Effect.sync(() => parseAinb(data)),
+            () => null
+          )
+          if (!logic) {
+            return describe('AINB', {
+              kind: 'unsupported',
+              reason: 'This logic graph could not be parsed — see the version it declares.'
+            })
+          }
+
+          /*
+           * Module references, deduplicated. A node whose name ends in `.module` names another AINB
+           * file, which is the one relationship the format gives up without decoding node bodies —
+           * so it is worth surfacing as something the user can follow.
+           */
+          const modules = [
+            ...new Set(
+              logic.nodes
+                .filter((node) => node.name.endsWith('.module'))
+                .map((node) => node.name)
+            )
+          ].sort()
+
+          return describe('AINB', {
+            kind: 'logic',
+            name: logic.name,
+            category: logic.category,
+            version: logic.versionText,
+            commands: logic.commands.map((command) => ({
+              name: command.name,
+              entryNodeIndex: command.entryNodeIndex
+            })),
+            nodeCount: logic.nodeCount,
+            nodes: logic.nodes.slice(0, NODE_LIMIT).map((node) => ({
+              index: node.index,
+              type: node.type,
+              userDefined: node.userDefined,
+              name: node.name
+            })),
+            nodeTypeCounts: logic.nodeTypeCounts.map((entry) => ({ ...entry })),
+            modules,
+            globalParameterCount: logic.globalParameterCount,
+            parameterCounts: {
+              immediate: sumCounts(logic.immediateParameterCounts),
+              input: sumCounts(logic.inputParameterCounts),
+              output: sumCounts(logic.outputParameterCounts)
+            },
+            problems: [...logic.problems]
+          })
+        }
+
         if (isMsbt(data)) {
           const document = yield* Effect.orElseSucceed(
             Effect.sync(() => parseMsbt(data)),
@@ -467,4 +524,9 @@ function renderAampValue(value: AampValue): string {
 /** Trims the float noise that makes a parameter list unreadable, without rounding meaning away. */
 function formatFloat(value: number): string {
   return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(4)))
+}
+
+/** Total parameters across the six value types, for a per-file summary. */
+function sumCounts(counts: AinbValueCounts): number {
+  return counts.int + counts.bool + counts.float + counts.string + counts.vec3f + counts.pointer
 }

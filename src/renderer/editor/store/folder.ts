@@ -73,6 +73,16 @@ interface FolderStore {
   /** The list-mode filter, which is per directory: a filter for one folder means nothing in another. */
   filters: Record<string, string>
   setFilter: (path: string, value: string) => void
+  /**
+   * How far each view was scrolled, keyed by view mode and path.
+   *
+   * The last piece of browsing state that a tab switch destroyed. Expansion and filters surviving
+   * while the scroll jumped back to the top is arguably worse than losing everything, because the
+   * tree is still open at the place you were — just not showing it. Keyed by mode as well as path
+   * because the tree and the flat list scroll independently over the same directory.
+   */
+  scrollOffsets: Record<string, number>
+  setScrollOffset: (key: string, offset: number) => void
   showArchiveTab: () => void
 }
 
@@ -112,7 +122,8 @@ export const useFolder = create<FolderStore>((set, get) => ({
       previewing: null,
       expanded: {},
       shownChildren: {},
-      filters: {}
+      filters: {},
+      scrollOffsets: {}
     }),
 
   setTab: (tab) => set({ tab }),
@@ -136,6 +147,10 @@ export const useFolder = create<FolderStore>((set, get) => ({
 
   filters: {},
   setFilter: (path, value) => set((state) => ({ filters: { ...state.filters, [path]: value } })),
+
+  scrollOffsets: {},
+  setScrollOffset: (key, offset) =>
+    set((state) => ({ scrollOffsets: { ...state.scrollOffsets, [key]: offset } })),
 
   showArchiveTab: () => set({ tab: 'archive' })
 }))

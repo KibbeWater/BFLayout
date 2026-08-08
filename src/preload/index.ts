@@ -73,5 +73,25 @@ contextBridge.exposeInMainWorld('bflayout', {
    * A request rather than a reply channel, so the answer arrives through the same path as every
    * other report and there is one place that decides what the state is.
    */
-  requestFullscreenState: (): void => ipcRenderer.send('ask-fullscreen')
+  requestFullscreenState: (): void => ipcRenderer.send('ask-fullscreen'),
+
+  /**
+   * Tells main which appearance to use for *native* chrome.
+   *
+   * The CSS class only reaches the page. Menus, traffic lights, scrollbars, native dialogs and the
+   * window frame follow `nativeTheme.themeSource`, and a light app with dark system dialogs is the
+   * kind of seam that reads as unpolished.
+   */
+  setThemeSource: (theme: 'dark' | 'light' | 'system'): void =>
+    ipcRenderer.send('set-theme-source', theme),
+
+  /**
+   * Reports the active document, so the window can behave like a document window.
+   *
+   * `edited` drives the dot macOS draws in the close button when there are unsaved changes, and
+   * `path` gives the title bar its proxy icon — both standard for a document-based Mac app, and both
+   * things this app already knew and did not say.
+   */
+  setDocumentState: (state: { title: string; path: string | null; edited: boolean }): void =>
+    ipcRenderer.send('set-document-state', state)
 })

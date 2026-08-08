@@ -1,13 +1,19 @@
 import { useEffect, type ReactNode } from 'react'
 
 import { useAutosave } from '@renderer/lib/use-autosave'
+import { useDocumentWindow } from '@renderer/lib/use-document-window'
 import { useOpenFile } from '@renderer/lib/use-open-file'
+import { useTheme } from '@renderer/lib/use-theme'
 import { useSave } from '@renderer/lib/use-save'
 import { useUnsavedGuard } from '@renderer/lib/use-unsaved-guard'
 import { ErrorBoundary } from './error-boundary'
 
 export function AppShell({ children }: { children: ReactNode }): ReactNode {
   useGlobalCommands()
+  // The theme setting was stored and applied to nothing; this is what makes it real.
+  useTheme()
+  // Title, proxy icon and the unsaved dot in the close button.
+  useDocumentWindow()
   // Recovery snapshots follow the documents, not the route.
   useAutosave()
 

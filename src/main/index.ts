@@ -1,6 +1,6 @@
 import { buildMenu } from './menu'
 import { join } from 'node:path'
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell } from 'electron'
 import { Effect } from 'effect'
 
 import type { WindowState } from '@shared/contract'
@@ -142,6 +142,42 @@ function createWindow(restored: WindowState | null): BrowserWindow {
    */
   ipcMain.on('ask-fullscreen', (event) => {
     if (event.sender === win.webContents) reportFullscreen()
+  })
+
+  /*
+   * The appearance of *native* chrome.
+   *
+   * The renderer's `.dark` class only reaches the page; menus, scrollbars, native dialogs and the
+   * window frame follow this. The theme setting existed and was applied to nothing at all — `dark`
+   * was hardcoded in the HTML — so `light` and `system` did nothing while the UI reported them as
+   * chosen.
+   */
+  ipcMain.on('set-theme-source', (event, theme: unknown) => {
+    if (event.sender !== win.webContents) return
+    if (theme === 'dark' || theme === 'light' || theme === 'system') {
+      nativeTheme.themeSource = theme
+    }
+  })
+
+  /*
+   * Makes this behave like a document window, which on macOS is a specific set of behaviours rather
+   * than a look: the title names the open file, the title bar carries its proxy icon, and the close
+   * button shows a dot while there are unsaved changes. The app already tracked all three facts and
+   * said none of them.
+   */
+  ipcMain.on('set-document-state', (event, state: unknown) => {
+    if (event.sender !== win.webContents || typeof state !== 'object' || state === null) return
+    const { title, path, edited } = state as {
+      title?: unknown
+      path?: unknown
+      edited?: unknown
+    }
+    if (typeof title === 'string') win.setTitle(title)
+    if (process.platform === 'darwin') {
+      win.setDocumentEdited(edited === true)
+      // An empty string clears it, which is what "no file open" should look like.
+      win.setRepresentedFilename(typeof path === 'string' ? path : '')
+    }
   })
 
   // Debounced so dragging or resizing does not hammer sqlite.

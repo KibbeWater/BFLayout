@@ -51,10 +51,41 @@ Every file, byte for byte. See [Validating against real
 files](#validating-against-real-files) for how to run it, and for the two format
 details that measurement caught and reading would not have.
 
+### A Mac app, not a web page in a window
+
+Three things the app already knew and did not say, plus one setting that did nothing at all.
+
+**The theme setting was stored and ignored.** `dark` was hardcoded on the `<html>` element, nothing
+ever read the persisted value, and the welcome screen printed the chosen theme back as though it had
+applied — so `light` and `system` did nothing. It is real now, in two halves, and the second is the
+one that matters: the `.dark` class reaches the page, and `nativeTheme.themeSource` in main reaches
+the *native* chrome — menus, traffic lights, scrollbars, native dialogs, the window frame. CSS alone
+leaves a light app with dark system dialogs, which is exactly the seam that reads as unpolished.
+`system` follows the OS live through `prefers-color-scheme`, which Chromium wires to the platform
+appearance, so no reload and no polling.
+
+**The window behaves like a document window**, which on macOS is a set of behaviours rather than a
+look: the title names the open file, the title bar carries its proxy icon — draggable to another app,
+right-clickable for the enclosing folder — and the close button shows the **dot** while there are
+unsaved changes. Every Mac editor does the last one, and its absence registers as not-quite-native
+without being obvious. All three facts were already tracked. The represented filename uses the
+*archive* path for a layout inside one, because a proxy icon has to be something the Finder can
+resolve.
+
+**Shortcuts go through TanStack Hotkeys**, which replaced a hand-rolled `event.metaKey ||
+event.ctrlKey` that was correct only by accident: it fired on **Ctrl+Z on macOS too**, where that is
+not the shortcut. `Mod` resolves to Command on macOS and Control elsewhere, and the library's
+`ignoreInputs` is the same focus guard that was hand-rolled next to it.
+
+The arrow-key nudges deliberately stay in a raw keydown handler: they are continuous,
+modifier-sensitive movement where Shift and Alt change what the key *means*, which is a handler's job
+rather than a table of bindings.
+
 ### Keyboard
 
 | Keys | What |
 | --- | --- |
+| Cmd/Ctrl + A | Select every pane |
 | Arrows | Nudge the selection by 1 |
 | Shift + arrows | Nudge by 10 |
 | Delete / Backspace | Delete the selection |

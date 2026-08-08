@@ -3804,6 +3804,33 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
         }
       }
 
+      /*
+       * A logic graph, from inside an archive: every AINB in the dump lives in a SARC. The packs are
+       * in Pack/, not in AI/ — that directory holds only node *definitions*, which is why an
+       * earlier version of this check skipped rather than failed. A skip reads like a pass, so it is
+       * worth pointing at the right place.
+       */
+      const aiListing = await c.folder.list({ path: romfs + '/Pack' }).catch(() => null)
+      const aiPack = aiListing
+        ? (aiListing.entries || []).find(e => !e.directory && e.name.startsWith('AI.'))
+        : null
+      if (aiPack) {
+        const archive = await c.archive.open({ path: aiPack.path })
+        const ainb = archive.entries.find(e => (e.displayName || '').endsWith('.ainb'))
+        if (ainb) {
+          const shown = await c.preview.open({
+            source: { kind: 'archive', archiveId: archive.archiveId, entryKey: ainb.key }
+          })
+          results.logic = {
+            format: shown.format,
+            kind: shown.content.kind,
+            nodes: shown.content.kind === 'logic' ? shown.content.nodeCount : 0,
+            commands: shown.content.kind === 'logic' ? shown.content.commands.length : 0,
+            problems: shown.content.kind === 'logic' ? shown.content.problems.length : -1
+          }
+        }
+      }
+
       const bwav = await findIn(romfs + '/Sound/Resource/Stream', n => n.endsWith('.bwav'))
       if (bwav) {
         const shown = await c.preview.open({ source: { kind: 'file', path: bwav.path } })
@@ -3865,6 +3892,18 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       )
     } else {
       out.push('SKIP model preview (no .bfres found)')
+    }
+
+    const logic = results['logic']
+    if (logic) {
+      check(
+        logic['kind'] === 'logic' && (logic['nodes'] as number) > 0,
+        `an AINB previews its graph: ${logic['nodes']} node(s), ${logic['commands']} entry point(s)`
+      )
+      // The parser reports anything it could not reconcile; none of the dump's 2,574 files do.
+      check(logic['problems'] === 0, 'and reconciled every region it read')
+    } else {
+      out.push('SKIP logic preview (no .ainb found)')
     }
 
     const audio = results['audio']

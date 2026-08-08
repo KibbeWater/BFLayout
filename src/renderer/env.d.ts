@@ -15,6 +15,14 @@ interface BFLayoutPreloadApi {
   readonly editRedo?: () => void
   /** Asks main to re-send the window's fullscreen state; see use-fullscreen.ts. */
   readonly requestFullscreenState?: () => void
+  /** Sets the appearance of native chrome — menus, scrollbars, dialogs, the window frame. */
+  readonly setThemeSource?: (theme: 'dark' | 'light' | 'system') => void
+  /** Window title, proxy icon and the unsaved dot in the close button. */
+  readonly setDocumentState?: (state: {
+    title: string
+    path: string | null
+    edited: boolean
+  }) => void
 }
 
 interface Window {

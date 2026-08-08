@@ -1,6 +1,18 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, Loader2 } from 'lucide-react'
+import {
+  AlertTriangle,
+  Box,
+  Braces,
+  FileQuestion,
+  Image,
+  Loader2,
+  MessageSquareText,
+  Music,
+  SlidersHorizontal,
+  Type,
+  Workflow
+} from 'lucide-react'
 
 import type { LayoutSource, Preview } from '@shared/contract'
 import { getOrpc } from '@renderer/lib/orpc'
@@ -29,25 +41,48 @@ export function PreviewPanel({
   const orpc = getOrpc()
   const preview = useQuery(orpc.preview.open.queryOptions({ input: { source } }))
 
+  const content = preview.data?.content
+  const style = content ? KIND_STYLE[content.kind] : null
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-baseline gap-2 border-b px-3 py-2">
-        <p className="min-w-0 flex-1 truncate font-medium" title={preview.data?.name}>
-          {preview.data?.name ?? 'Opening…'}
-        </p>
+      {/*
+        One header for every format, with a coloured badge naming the kind.
+        
+        The preview shows eight very different things, and without a consistent frame each read as a
+        different screen. The badge is the fastest answer to "what am I looking at", and its colour
+        makes the answer recognisable before the words are read.
+      */}
+      <div className="shrink-0 border-b">
+        <div className="flex items-center gap-2 px-3 pt-2.5">
+          {style ? (
+            <span
+              className={`flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${style.badge}`}
+            >
+              {style.icon}
+              {style.label}
+            </span>
+          ) : null}
+          <p
+            className="min-w-0 flex-1 truncate text-sm font-medium"
+            title={preview.data?.name}
+          >
+            {preview.data?.name ?? 'Opening…'}
+          </p>
+          <button
+            type="button"
+            onClick={onClose}
+            className="shrink-0 rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            Close
+          </button>
+        </div>
         {preview.data ? (
-          <p className="shrink-0 text-[11px] text-muted-foreground">
+          <p className="px-3 pb-2 pt-0.5 font-mono text-[10px] text-muted-foreground/70">
             {preview.data.format} · {formatSize(preview.data.bytes)}
             {preview.data.compression === 'none' ? '' : ` · ${preview.data.compression}`}
           </p>
         ) : null}
-        <button
-          type="button"
-          onClick={onClose}
-          className="shrink-0 rounded border px-1.5 py-0.5 text-[11px] hover:bg-accent"
-        >
-          Close
-        </button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
@@ -68,6 +103,63 @@ export function PreviewPanel({
   )
 }
 
+/**
+ * Badge, icon and accent for each content kind.
+ *
+ * A lookup rather than logic in the header, so adding a format means adding a row here and the shell
+ * cannot end up with a format it has no label for — the type checker requires every kind to appear.
+ */
+const KIND_STYLE: Record<
+  Preview['content']['kind'],
+  { label: string; badge: string; icon: ReactNode }
+> = {
+  font: {
+    label: 'font',
+    badge: 'bg-violet-500/15 text-violet-400',
+    icon: <Type className="size-3" />
+  },
+  textures: {
+    label: 'textures',
+    badge: 'bg-sky-500/15 text-sky-400',
+    icon: <Image className="size-3" />
+  },
+  data: {
+    label: 'data',
+    badge: 'bg-emerald-500/15 text-emerald-400',
+    icon: <Braces className="size-3" />
+  },
+  messages: {
+    label: 'text',
+    badge: 'bg-amber-500/15 text-amber-400',
+    icon: <MessageSquareText className="size-3" />
+  },
+  model: {
+    label: 'model',
+    badge: 'bg-orange-500/15 text-orange-400',
+    icon: <Box className="size-3" />
+  },
+  parameters: {
+    label: 'parameters',
+    badge: 'bg-teal-500/15 text-teal-400',
+    icon: <SlidersHorizontal className="size-3" />
+  },
+  audio: {
+    label: 'audio',
+    badge: 'bg-pink-500/15 text-pink-400',
+    icon: <Music className="size-3" />
+  },
+  logic: {
+    label: 'logic',
+    badge: 'bg-indigo-500/15 text-indigo-400',
+    icon: <Workflow className="size-3" />
+  },
+  unsupported: {
+    label: 'unread',
+    badge: 'bg-muted text-muted-foreground',
+    icon: <FileQuestion className="size-3" />
+  }
+}
+
 function Body({ preview }: { preview: Preview }): ReactNode {
   const content = preview.content
   switch (content.kind) {
@@ -83,6 +175,8 @@ function Body({ preview }: { preview: Preview }): ReactNode {
       return <ParameterBody content={content} />
     case 'audio':
       return <AudioBody content={content} />
+    case 'logic':
+      return <LogicBody content={content} />
     case 'textures':
       return <TextureList content={content} />
     case 'unsupported':
@@ -464,6 +558,188 @@ function ParameterBody({
       {content.nodes.length < content.total ? (
         <p className="shrink-0 border-t px-3 py-1 text-[11px] text-amber-500">
           Showing {content.nodes.length} of {content.total} nodes.
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * An AINB logic graph, as far as the format has given it up.
+ *
+ * Deliberately **not** a node graph with edges, and that is the honest part. Node-to-node
+ * connections live in the per-node parameter bodies, which this build locates and bounds-checks but
+ * does not decode — so which node feeds which is unknown. Drawing a graph would mean inventing the
+ * edges, and a convincing wrong picture of a game's AI is worse than an accurate list.
+ *
+ * What the file does say, and what is shown: its entry points, every node with its type and name,
+ * how the types are distributed, and the other AINB modules it pulls in — which is a real edge, at
+ * file level rather than node level, and the one relationship available without decoding bodies.
+ */
+function LogicBody({
+  content
+}: {
+  content: Extract<Preview['content'], { kind: 'logic' }>
+}): ReactNode {
+  const [filter, setFilter] = useState('')
+  const [focused, setFocused] = useState<number | null>(null)
+  const needle = filter.trim().toLowerCase()
+
+  const shown = useMemo(
+    () =>
+      needle === ''
+        ? content.nodes
+        : content.nodes.filter(
+            (node) =>
+              node.name.toLowerCase().includes(needle) ||
+              String(node.type).includes(needle) ||
+              String(node.index) === needle
+          ),
+    [content.nodes, needle]
+  )
+
+  const named = content.nodes.filter((node) => node.userDefined).length
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="shrink-0 space-y-2 border-b p-3">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[11px]">
+          <span className="font-mono text-xs">{content.name}</span>
+          <span className="text-muted-foreground">
+            {content.category} · v{content.version} · {content.nodeCount} node
+            {content.nodeCount === 1 ? '' : 's'} ({named} named) · {content.globalParameterCount}{' '}
+            globals
+          </span>
+        </div>
+
+        {content.commands.length > 0 ? (
+          <div>
+            <h3 className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Entry points
+            </h3>
+            <ul className="flex flex-wrap gap-1.5">
+              {content.commands.map((command) => (
+                <li key={`${command.name}-${command.entryNodeIndex}`}>
+                  {/* Jumping to the entry node is the one bit of navigation the data supports. */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFilter('')
+                      setFocused(command.entryNodeIndex)
+                    }}
+                    title={`Show node ${command.entryNodeIndex}`}
+                    className="flex items-center gap-1 rounded border border-indigo-500/40 bg-indigo-500/10 px-1.5 py-0.5 font-mono text-[11px] hover:bg-indigo-500/20"
+                  >
+                    {command.name}
+                    <span className="text-muted-foreground">#{command.entryNodeIndex}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {content.modules.length > 0 ? (
+          <div>
+            <h3 className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Pulls in {content.modules.length} module{content.modules.length === 1 ? '' : 's'}
+            </h3>
+            <p className="flex flex-wrap gap-1 font-mono text-[10px] text-muted-foreground">
+              {content.modules.map((module) => (
+                <span key={module} className="rounded bg-muted px-1 py-0.5">
+                  {module.replace(/\.module$/, '')}
+                </span>
+              ))}
+            </p>
+          </div>
+        ) : null}
+
+        {content.nodeTypeCounts.length > 1 ? (
+          <div>
+            <h3 className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Node types
+            </h3>
+            {/*
+              A bar per type. Only type 0 carries a name, so the rest are numbers on purpose:
+              nothing in these files labels them, and a label borrowed from elsewhere would be a
+              guess presented as a fact.
+            */}
+            <ul className="space-y-0.5">
+              {content.nodeTypeCounts.slice(0, 8).map((entry) => (
+                <li key={entry.type} className="flex items-center gap-2 text-[10px]">
+                  <span className="w-16 shrink-0 font-mono text-muted-foreground">
+                    {entry.type === 0 ? 'user' : `type ${entry.type}`}
+                  </span>
+                  <span className="h-1.5 flex-1 overflow-hidden rounded bg-muted">
+                    <span
+                      className="block h-full rounded bg-indigo-500/60"
+                      style={{
+                        width: `${Math.max(2, (entry.count / content.nodeCount) * 100)}%`
+                      }}
+                    />
+                  </span>
+                  <span className="w-10 shrink-0 text-right tabular-nums text-muted-foreground">
+                    {entry.count}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {content.problems.length > 0 ? (
+          <ul className="space-y-0.5 text-[11px] text-amber-500">
+            {content.problems.map((problem) => (
+              <li key={problem}>{problem}</li>
+            ))}
+          </ul>
+        ) : null}
+
+        <div className="flex items-center gap-2">
+          <input
+            value={filter}
+            onChange={(event) => {
+              setFilter(event.target.value)
+              setFocused(null)
+            }}
+            placeholder="Filter nodes by name, type or index"
+            className="w-full rounded border bg-input/40 px-1.5 py-1 text-xs outline-none"
+          />
+          <span className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground">
+            {shown.length === content.nodes.length
+              ? `${shown.length} shown`
+              : `${shown.length} of ${content.nodes.length}`}
+          </span>
+        </div>
+        <p className="text-[10px] text-muted-foreground/60">
+          Connections between nodes are not decoded — the per-node parameter bodies are located but
+          unread, so no edges are drawn rather than invented ones.
+        </p>
+      </div>
+
+      <ul className="min-h-0 flex-1 overflow-auto py-1 font-mono text-[11px]">
+        {shown.map((node) => (
+          <li
+            key={node.index}
+            className={`flex items-baseline gap-2 px-3 py-0.5 ${
+              focused === node.index ? 'bg-indigo-500/20' : 'hover:bg-accent/40'
+            }`}
+          >
+            <span className="w-10 shrink-0 text-right text-muted-foreground/60">
+              {node.index}
+            </span>
+            <span className="w-14 shrink-0 text-muted-foreground">
+              {node.userDefined ? 'user' : `t${node.type}`}
+            </span>
+            <span className="min-w-0 flex-1 truncate select-text">
+              {node.name || <span className="text-muted-foreground/40">(unnamed)</span>}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {content.nodes.length < content.nodeCount ? (
+        <p className="shrink-0 border-t px-3 py-1 text-[11px] text-amber-500">
+          Showing {content.nodes.length} of {content.nodeCount} nodes.
         </p>
       ) : null}
     </div>

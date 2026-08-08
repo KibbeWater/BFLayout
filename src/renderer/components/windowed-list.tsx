@@ -22,7 +22,9 @@ export function WindowedList<T>({
   keyOf,
   overscan = 8,
   className,
-  header
+  header,
+  scrollRef,
+  onScrollChange
 }: {
   items: readonly T[]
   /** Must match the rendered row height, or the spacers drift out of step. */
@@ -32,6 +34,15 @@ export function WindowedList<T>({
   /** Extra rows above and below, so a fast scroll does not show blank space. */
   overscan?: number
   className?: string
+  /**
+   * Attached to the scroll container, so a caller can restore a remembered position.
+   *
+   * The list owns its own scrolling — it has to, because it needs the viewport height to window by —
+   * which means the caller cannot reach the element any other way.
+   */
+  scrollRef?: (node: HTMLDivElement | null) => void
+  /** Called on every scroll, for a caller that wants to remember the position. */
+  onScrollChange?: (scrollTop: number) => void
   /**
    * Rendered above the rows, *inside* the scroll container — a sticky filter row is the
    * intended use, and stickiness needs a scrolling ancestor. Its height is not part of
@@ -48,10 +59,15 @@ export function WindowedList<T>({
    * Measured rather than assumed, and re-measured on resize: the panel is behind a
    * splitter, so its height changes while the list is open.
    */
-  const attach = useCallback((node: HTMLDivElement | null) => {
-    ref.current = node
-    if (node) setViewport(node.clientHeight)
-  }, [])
+  const attach = useCallback(
+    (node: HTMLDivElement | null) => {
+      ref.current = node
+      if (node) setViewport(node.clientHeight)
+      // Forwarded after measuring, so a caller restoring `scrollTop` acts on a laid-out element.
+      scrollRef?.(node)
+    },
+    [scrollRef]
+  )
 
   useEffect(() => {
     const node = ref.current
@@ -83,7 +99,10 @@ export function WindowedList<T>({
   return (
     <div
       ref={attach}
-      onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+      onScroll={(event) => {
+        setScrollTop(event.currentTarget.scrollTop)
+        onScrollChange?.(event.currentTarget.scrollTop)
+      }}
       className={className}
     >
       {header}

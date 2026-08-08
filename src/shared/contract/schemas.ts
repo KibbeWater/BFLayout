@@ -440,6 +440,47 @@ export const previewContentSchema = z.discriminatedUnion('kind', [
     undecodableReason: z.string().nullable()
   }),
   /**
+   * An AINB logic graph's structure.
+   *
+   * Node-to-node connections are **not** included, because they are not decoded: the per-node
+   * parameter bodies are located and bounds-checked but their layout is unread, so which node feeds
+   * which is unknown. Drawing a graph from what is known would mean inventing the edges, so what is
+   * shown is what the file actually says — entry points, nodes, types, and the modules it pulls in.
+   */
+  z.object({
+    kind: z.literal('logic'),
+    name: z.string(),
+    category: z.string(),
+    version: z.string(),
+    /** Entry points. `entryNodeIndex` is verified in range; that it is the *entry* is inferred. */
+    commands: z.array(z.object({ name: z.string(), entryNodeIndex: z.number().int() })),
+    nodeCount: z.number().int(),
+    nodes: z.array(
+      z.object({
+        index: z.number().int(),
+        type: z.number().int(),
+        userDefined: z.boolean(),
+        name: z.string()
+      })
+    ),
+    nodeTypeCounts: z.array(z.object({ type: z.number().int(), count: z.number().int() })),
+    /**
+     * Other AINB files this one pulls in, from nodes whose name ends in `.module`.
+     *
+     * The one genuine relationship the format gives up without decoding node bodies — a real edge,
+     * at file level rather than node level.
+     */
+    modules: z.array(z.string()),
+    globalParameterCount: z.number().int(),
+    parameterCounts: z.object({
+      immediate: z.number().int(),
+      input: z.number().int(),
+      output: z.number().int()
+    }),
+    /** Anything the parser could not reconcile, in words. Empty for every file in the dump. */
+    problems: z.array(z.string())
+  }),
+  /**
    * Recognised but with nothing to show yet. Carries the reason, because "this build does not
    * decode BFRES" and "this file is damaged" are different things to be told.
    */
