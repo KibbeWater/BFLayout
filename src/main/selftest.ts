@@ -867,6 +867,136 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   check(sessions.keyed === true, 'every session behind a live tab carries a durable key')
 
   /*
+   * Text panes drawn in the game's own typeface.
+   *
+   * Needs a real dump, because the whole point is a lookup *across* it: this game ships no
+   * BFFNT bitmap fonts, and its layouts name .bfcpx complexes which resolve to obfuscated
+   * scalable faces in a different archive entirely. Two things have to hold and neither is
+   * visible from the pixels: the font archive has to be found by walking up from the layout,
+   * and the faces have to decode and register with the document.
+   *
+   * The synthetic fixture cannot exercise this — no Font directory, and it names a font
+   * nothing ships — so this is guarded on the romfs rather than folded in above.
+   */
+  const fontRomfs = process.env['BFLAYOUT_SELFTEST_ROMFS'] ?? ''
+  if (!fontRomfs) {
+    out.push('SKIP game fonts (BFLAYOUT_SELFTEST_ROMFS not set)')
+  } else {
+    const fonts = (await win.webContents.executeJavaScript(`(async () => {
+    const c = window.__bfclient
+    const romfs = ${JSON.stringify(fontRomfs)}
+
+    /*
+     * Search for a layout that actually names a font. Most do not have text panes at all,
+     * so taking the first archive found and giving up when it names no fonts tested nothing
+     * — it skipped, every time, and looked like a pass.
+     */
+    const listing = await c.folder.list({ path: romfs + '/Layout' })
+    const archives = (listing.entries || [])
+      .filter(e => !e.directory && e.name.includes('.blarc'))
+      .slice(0, 12)
+    if (archives.length === 0) return { skipped: 'no layout archive under Layout/' }
+
+    let source = null
+    let names = null
+    let openedId = null
+    let scanned = 0
+    for (const candidate of archives) {
+      const archive = await c.archive.open({ path: candidate.path })
+      for (const entry of archive.entries.filter(e => e.kind === 'layout').slice(0, 8)) {
+        scanned++
+        const trySource = { kind: 'archive', archiveId: archive.archiveId, entryKey: entry.key }
+        const opened = await c.layout.open({ source: trySource })
+        if (opened.document.fonts && opened.document.fonts.length > 0) {
+          source = trySource
+          names = opened.document.fonts
+          openedId = opened.documentId
+          break
+        }
+        await c.layout.close({ documentId: opened.documentId })
+      }
+      if (source) break
+    }
+    if (!source || !names) return { skipped: 'no layout naming a font in ' + scanned + ' scanned' }
+    const opened = { documentId: openedId, document: { fonts: names } }
+
+    let chain = null
+    let failure = ''
+    try {
+      chain = await c.fonts.chain({ source, name: names[0] })
+    } catch (cause) {
+      failure = String(cause && cause.message ? cause.message : cause)
+    }
+    await c.layout.close({ documentId: opened.documentId })
+    if (!chain) return { error: 'could not resolve ' + names[0] + ': ' + failure }
+
+    // Registering with the document is what actually lets the canvas use them.
+    const registered = []
+    for (const face of chain.faces) {
+      const family = 'bflayout-' + face.name
+      const bytes = await face.sfnt.arrayBuffer()
+      const font = new FontFace(family, bytes)
+      await font.load()
+      document.fonts.add(font)
+      if (document.fonts.check('16px ' + JSON.stringify(family))) registered.push(face.name)
+    }
+
+    // Metrics differing from the fallback prove the canvas measures the game face.
+    const main = chain.faces[chain.faces.length - 1]
+    const context = document.createElement('canvas').getContext('2d')
+    const sample = 'Wg0123'
+    context.font = '32px sans-serif'
+    const fallbackWidth = context.measureText(sample).width
+    context.font = '32px ' + JSON.stringify('bflayout-' + main.name) + ', sans-serif'
+    const gameWidth = context.measureText(sample).width
+
+    return {
+      name: names[0],
+      archive: chain.archive,
+      faces: chain.faces.map(f => f.name),
+      kinds: chain.faces.map(f => f.kind),
+      missing: chain.missing,
+      registered,
+      fallbackWidth,
+      gameWidth
+    }
+  })()`)) as {
+      error?: string
+      skipped?: string
+      name?: string
+      archive?: string
+      faces?: string[]
+      kinds?: string[]
+      missing?: string[]
+      registered?: string[]
+      fallbackWidth?: number
+      gameWidth?: number
+    }
+
+    if (fonts.error) {
+      check(false, `game fonts: ${fonts.error}`)
+    } else if (fonts.skipped) {
+      out.push(`SKIP game fonts (${fonts.skipped})`)
+    } else {
+      const faces = fonts.faces ?? []
+      check(
+        faces.length > 0,
+        `${fonts.name} resolved to ${faces.length} face(s) [${(fonts.kinds ?? []).join(', ')}]` +
+          ((fonts.missing ?? []).length > 0 ? ` (missing ${fonts.missing!.join(', ')})` : '')
+      )
+      check(
+        (fonts.registered ?? []).length === faces.length,
+        `every face registered with the document (${(fonts.registered ?? []).length}/${faces.length})`
+      )
+      check(
+        fonts.gameWidth !== fonts.fallbackWidth,
+        `text measures differently in the game face than in sans-serif ` +
+          `(${fonts.gameWidth?.toFixed(1)} vs ${fonts.fallbackWidth?.toFixed(1)})`
+      )
+    }
+  }
+
+  /*
    * Closing the last tab with the Materials panel open.
    *
    * Panels that read the active document have to survive there not being one, and the way

@@ -16,6 +16,7 @@ import {
   openPurposeSchema,
   recentEntrySchema,
   recentKindSchema,
+  fontChainSchema,
   snapshotSummarySchema,
   bymlDocumentSchema,
   folderListingSchema,
@@ -233,6 +234,19 @@ export const layoutContract = {
  * decides where to look for them: an entry in an archive searches that archive's
  * texture folder first, a loose .bflyt searches the directory beside it.
  */
+/**
+ * The typefaces a layout's text panes are drawn with.
+ *
+ * A layout's font list names `.bfcpx` complexes, which name obfuscated scalable faces in a
+ * *different* archive — so this is a lookup across the dump, not inside the layout. The
+ * faces come back as a fallback chain the renderer can hand straight to a canvas.
+ */
+export const fontsContract = {
+  chain: base
+    .input(z.object({ source: layoutSourceSchema, name: z.string().min(1) }))
+    .output(fontChainSchema)
+}
+
 export const texturesContract = {
   list: base.input(z.object({ source: layoutSourceSchema })).output(textureListSchema),
   get: base
@@ -326,6 +340,7 @@ export const contract = {
   archive: archiveContract,
   layout: layoutContract,
   textures: texturesContract,
+  fonts: fontsContract,
   animation: animationContract,
   folder: folderContract,
   byml: bymlContract,

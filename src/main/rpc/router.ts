@@ -8,6 +8,7 @@ import { DialogService } from '@main/services/dialog'
 import { BymlService } from '@main/services/byml'
 import { SnapshotService } from '@main/services/snapshots'
 import { FolderService } from '@main/services/folder'
+import { FontService } from '@main/services/fonts'
 import { LayoutService } from '@main/services/layout'
 import { RecentsService } from '@main/services/recents'
 import { SettingsService } from '@main/services/settings'
@@ -256,6 +257,17 @@ const snapshotRoutes = {
   })
 }
 
+/**
+ * Font lookups are read-only and cached in main, so this is a thin passthrough. A layout
+ * whose fonts cannot be found is a normal outcome — not every dump ships a Font directory
+ * — and the typed NOT_FOUND lets the renderer fall back quietly rather than shout.
+ */
+const fontRoutes = {
+  chain: os.fonts.chain.handler(({ input }) =>
+    run(Effect.flatMap(FontService, (s) => s.chain(input.source, input.name)))
+  )
+}
+
 const bymlRoutes = {
   open: os.byml.open.handler(({ input }) =>
     run(Effect.flatMap(BymlService, (s) => s.open(input.path)))
@@ -270,6 +282,7 @@ export const router = os.router({
   textures: textureRoutes,
   animation: animationRoutes,
   folder: folderRoutes,
+  fonts: fontRoutes,
   byml: bymlRoutes,
   snapshot: snapshotRoutes
 })

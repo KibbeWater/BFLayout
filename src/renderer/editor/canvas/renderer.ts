@@ -26,6 +26,7 @@ import type {
 
 import type { AnimationOverrides, MaterialOverride } from '@shared/formats/bflan'
 
+import { FontStore } from './font-store'
 import { TextRasterizer } from './text-raster'
 import { TextureStore } from './texture-store'
 
@@ -145,6 +146,7 @@ export class LayoutRenderer {
   private readonly viewLocation: WebGLUniformLocation
 
   readonly textures: TextureStore
+  readonly fonts: FontStore
   private readonly text: TextRasterizer
 
   private vertices: number[] = []
@@ -213,6 +215,9 @@ export class LayoutRenderer {
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
 
     this.textures = new TextureStore(gl, onTexturesChanged)
+    // The same change callback: a font arriving needs a redraw for exactly the same reason
+    // a texture arriving does.
+    this.fonts = new FontStore(onTexturesChanged)
     this.text = new TextRasterizer(gl)
   }
 
@@ -455,7 +460,9 @@ export class LayoutRenderer {
         this.buildPart(entry, entry.pane as PartPane, alpha, options)
       } else if (entry.pane.kind === 'txt1') {
         if (options.showTextures) this.frameTextIds.add(entry.pane.id)
-        const raster = options.showTextures ? this.text.lookup(entry.pane as TextPane) : null
+        const raster = options.showTextures
+          ? this.text.lookup(entry.pane as TextPane, this.familiesFor(document, entry.pane as TextPane))
+          : null
         if (raster) {
           // The gradient and shadow are baked into the raster, so the vertex
           // colour only carries the inherited alpha.
@@ -546,6 +553,18 @@ export class LayoutRenderer {
    * needs its magnify factor applied on top. Nesting is bounded by `depth`: parts
    * can reference each other, and a cycle would otherwise recurse forever.
    */
+  /**
+   * The typeface families a text pane should be drawn with.
+   *
+   * `fontIndex` addresses the *document's own* font list, which is why this takes the
+   * document rather than reading the active tab: a part pane draws another layout's panes,
+   * and those index that layout's list, not this one's.
+   */
+  private familiesFor(document: LayoutDocument, pane: TextPane): readonly string[] {
+    const name = document.fonts[pane.fontIndex]
+    return name ? this.fonts.familiesFor(name) : []
+  }
+
   private buildPart(
     entry: PaneTransform,
     pane: PartPane,
@@ -596,7 +615,9 @@ export class LayoutRenderer {
         this.buildWindow(document, combined, inner.pane as WindowPane, innerAlpha, options, null)
       } else if (inner.pane.kind === 'txt1') {
         if (options.showTextures) this.frameTextIds.add(inner.pane.id)
-        const raster = options.showTextures ? this.text.lookup(inner.pane as TextPane) : null
+        const raster = options.showTextures
+          ? this.text.lookup(inner.pane as TextPane, this.familiesFor(document, inner.pane as TextPane))
+          : null
         const tint = [1, 1, 1, innerAlpha]
         if (raster) {
           this.useTexture(raster)

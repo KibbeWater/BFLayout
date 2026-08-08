@@ -14,6 +14,7 @@ import { PathsLive } from './services/paths-live'
 import { RecentsService } from './services/recents'
 import { SettingsService } from './services/settings'
 import { TextureService } from './services/textures'
+import { FontService } from './services/fonts'
 import { WindowStateService } from './services/window-state'
 import { WorkspaceService } from './services/workspace'
 
@@ -29,6 +30,7 @@ export const AppLayer = Layer.mergeAll(
   DialogService.Default,
   LayoutService.Default,
   TextureService.Default,
+  FontService.Default,
   AnimationService.Default,
   WorkspaceService.Default,
   FolderService.Default,

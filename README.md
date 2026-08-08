@@ -13,7 +13,7 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | Pane hierarchy, properties, canvas | Working |
 | Materials (colours, blend, alpha compare, texture maps) | Editable |
 | Window panes (nine-slice / pinwheel frames) | Working |
-| Text panes | Preview only — system font, not BFFNT |
+| Text panes | Drawn in the game's own typeface; glyph layout is still approximate |
 | Undo / redo | Working — every edit, including property, material and visibility |
 | Add / delete / duplicate pane, grid snapping | Working |
 | Reorder and reparent panes (z-order) | Working — buttons and Alt+arrows |
@@ -34,7 +34,7 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | prt1 external part resolution | Working (parts draw their referenced layout) |
 | Texture export to PNG | Working |
 | Texture add / replace | Not started (textures are otherwise read-only) |
-| BFFNT font rendering | Out of scope for v1 (see Text panes) |
+| BFFNT font rendering | Not needed for this title — it ships scalable fonts, which do decode (see Text panes) |
 
 **Validated against real game files.** Every layout archive in a Tomodachi Life
 romfs dump (Switch, v1.0.4) is parsed and rewritten byte for byte:
@@ -490,11 +490,37 @@ Ring thickness comes from each frame texture's own dimensions, falling back to t
 pane's `frameElem` fields — that order matters, because shipped layouts leave
 `frameElem` at zero and let the art decide.
 
-Text panes are rasterised with a **system font**, not the layout's BFFNT. You get
-the right string at roughly the right size, colour, alignment and spacing —
-enough to identify and position a label, not enough to judge how it will look.
-Rasters are cached per pane and only redrawn when something affecting their pixels
-changes.
+Text panes are drawn in **the game's own typeface**, which took finding out what that
+even is. There are no BFFNT bitmap fonts in this title at all — a layout's `fnl1`
+entry names a `.bfcpx` *font complex*, which names several obfuscated `.bfttf`/`.bfotf`
+scalable faces living in a different archive (`Font/Font.Nin_NX_NVN.bfarc.zs`, beside
+`Layout/` under the dump root). So implementing BFFNT would have been dead code, and
+the useful work was elsewhere.
+
+A `.bfttf` is an ordinary sfnt under eight bytes of header, XORed one big-endian u32 at
+a time with a key chosen by its magic. The keys come from the reference implementation,
+but they were **checked rather than trusted**, and the check is the reason to believe
+them: for every one of the eleven faces in the archive, exactly one candidate key yields
+both a valid sfnt signature and a declared length equal to the file length minus eight
+— and the decoded bytes then have a sorted table directory of real tags (`CFF `, `cmap`,
+`glyf`, `hmtx`, `GPOS`) all in bounds. Three independent invariants agreeing is not a
+coincidence a wrong key could produce.
+
+The complex's face order turns out to be a per-glyph fallback chain — specialised faces
+first (gaiji, extended glyphs, digits), main typeface last — which is exactly the order
+CSS resolves `font-family` in. So the chain is registered as `FontFace`s and handed to
+the canvas verbatim, and the browser does the glyph-by-glyph fallback itself. Only the
+descriptor's *name table* is modelled: the records ahead of it are readable but their
+stride cannot be pinned down from seven samples, and the worst a future variation can
+cost this way is a fallback face the canvas does without.
+
+What is still approximate is the **glyph layout**, not the typeface: Canvas2D does its
+own shaping and kerning, so character positions will not match the game exactly, and
+per-character transforms are not modelled. Close enough to judge how a label looks; not
+a pixel reference. A dump with no `Font` directory degrades to `sans-serif` silently,
+because that is a normal thing for a dump to be. Rasters are cached per pane, keyed on
+the resolved families as well as the content, so text drawn with the fallback is redrawn
+once the real faces arrive rather than staying wrong.
 
 The frame **UV mapping is an approximation**: a stretched axis maps 0 to
 `length / frameSize`, so with clamped sampling the frame renders at natural size

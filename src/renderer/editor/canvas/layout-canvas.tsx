@@ -604,6 +604,9 @@ export function LayoutCanvas(): ReactNode {
 
     const rect = container.getBoundingClientRect()
     renderer.textures.setSource(tab.source)
+    // Fonts live in a different archive from the layout, but they are found *relative* to
+    // it, so the store needs the same source the textures do.
+    renderer.fonts.setSource(tab.source)
     try {
       renderer.render(
         tab.document,

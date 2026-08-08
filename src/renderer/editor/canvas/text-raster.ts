@@ -1,14 +1,18 @@
 import type { TextPane } from '@shared/formats/bflyt'
 
 /**
- * Rasterises text panes with a system font.
+ * Rasterises text panes.
  *
- * **This is a preview approximation, not what the game shows.** Real layouts
- * draw text with a BFFNT bitmap font whose glyphs, metrics and kerning are
- * baked into the archive; decoding those is out of scope for v1. What you get
- * here is the right string, at roughly the right size, colour, alignment and
- * spacing, in whatever sans-serif the OS provides — enough to identify and
- * position a label, not enough to judge how it will look.
+ * **Still an approximation, but now in the game's own typeface.** This title ships no BFFNT
+ * bitmap fonts — its layouts name `.bfcpx` complexes, which resolve to obfuscated scalable
+ * faces in the font archive — and those are decoded and registered, so the families passed
+ * in are the real thing. What remains approximate is the *layout* of the glyphs: Canvas2D
+ * does its own shaping and kerning, so character positions will not match the game
+ * exactly, and per-character transforms are not modelled at all. Close enough to judge how
+ * a label looks; not a pixel reference.
+ *
+ * A font that could not be found leaves the families empty and the text draws in
+ * `sans-serif`, exactly as it did before any font decoding existed.
  *
  * Rasters are cached by content, so panning and dragging never re-rasterise; a
  * text pane only re-renders when something that affects its pixels changes.
@@ -48,8 +52,11 @@ function rgbaCss(color: readonly [number, number, number, number]): string {
 }
 
 /** Everything that changes the pixels; anything else must not bust the cache. */
-function signature(pane: TextPane): string {
+function signature(pane: TextPane, families: readonly string[]): string {
   return [
+    // The families are part of the signature, so text drawn in the fallback font is
+    // redrawn once the real faces finish loading rather than staying wrong forever.
+    families.join(','),
     pane.text,
     pane.width,
     pane.height,
@@ -88,16 +95,16 @@ export class TextRasterizer {
    * A texture holding this pane's text, mapped 0..1 across the pane rect. Null
    * when there is nothing to draw or the 2D context is unavailable.
    */
-  lookup(pane: TextPane): WebGLTexture | null {
+  lookup(pane: TextPane, families: readonly string[] = []): WebGLTexture | null {
     if (pane.text.length === 0) return null
     if (pane.width <= 0 || pane.height <= 0) return null
 
     const key = pane.id
-    const wanted = signature(pane)
+    const wanted = signature(pane, families)
     const cached = this.rasters.get(key)
     if (cached && cached.signature === wanted) return cached.texture
 
-    const drawn = this.draw(pane)
+    const drawn = this.draw(pane, families)
     if (!drawn) return null
 
     // Replacing a pane's raster frees the old one; a long editing session must
@@ -107,7 +114,7 @@ export class TextRasterizer {
     return drawn
   }
 
-  private draw(pane: TextPane): WebGLTexture | null {
+  private draw(pane: TextPane, families: readonly string[]): WebGLTexture | null {
     const scale = Math.min(
       SCALE,
       MAX_DIMENSION / Math.max(pane.width, pane.height, 1)
@@ -125,7 +132,14 @@ export class TextRasterizer {
 
     const fontSize = pane.fontSize[1] || pane.fontSize[0] || 16
     const italic = pane.italicTilt !== 0 ? 'italic ' : ''
-    context.font = `${italic}${fontSize}px sans-serif`
+    /*
+     * The chain verbatim, with `sans-serif` last. The order is the game's own — specialised
+     * faces first, main typeface last — which is also the order the browser resolves
+     * `font-family` in, so per-glyph fallback comes for free. Family names are quoted
+     * because they carry hyphens and digits.
+     */
+    const stack = [...families.map((family) => `"${family}"`), 'sans-serif'].join(', ')
+    context.font = `${italic}${fontSize}px ${stack}`
     context.textBaseline = 'alphabetic'
     // charSpace is extra advance per character, which maps onto letterSpacing.
     context.letterSpacing = `${pane.charSpace}px`
