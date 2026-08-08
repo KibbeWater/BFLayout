@@ -1,9 +1,10 @@
 /**
  * BNTX texture containers: parsing, Tegra X1 deswizzling and RGBA8 decoding.
  *
- * BC6H and BC7 are recognised by the parser but have no decoder; decodeTexture
- * throws UnsupportedFormatError for them so callers can fall back to a
- * placeholder rather than display wrong pixels.
+ * BC6H and BC7 are recognised by the parser but decodeTexture throws
+ * UnsupportedFormatError for them, so callers fall back to a placeholder rather than
+ * display wrong pixels. `decodeBc7Block` exists and is exported for the GPU
+ * cross-validation in the self-test; it is wired into decodeSurface once that passes.
  */
 
 export type { BntxContainer, BntxTexture } from './container'
@@ -34,6 +35,8 @@ export {
 
 export type { DecodedImage } from './decode'
 export { applyChannelSources, decodeSurface, decodeTexture, isFormatSupported } from './decode'
+
+export { decodeBc7Block } from './bc7'
 
 export type { AstcDecodeResult } from './astc'
 export { decodeAstc, decodeAstcBlock } from './astc'

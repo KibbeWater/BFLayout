@@ -12,6 +12,7 @@ import { reportError } from './lib/toast'
 import { router } from './router'
 import { useDocuments } from './editor/store/document'
 import { panesInRect } from '@shared/formats/bflyt/editing'
+import { decodeBc7Block } from '@shared/formats/bntx'
 import { useFolder } from './editor/store/folder'
 import { usePlayback } from './editor/store/playback'
 import { useWorkspace } from './editor/store/workspace'
@@ -39,6 +40,8 @@ if (import.meta.env.DEV) {
     playback: usePlayback,
     folder: useFolder,
     editing: { panesInRect },
+    // Exposed for the BC7 GPU cross-check, which needs a CPU decode to compare against.
+    bntx: { decodeBc7Block },
     router
   }
 }

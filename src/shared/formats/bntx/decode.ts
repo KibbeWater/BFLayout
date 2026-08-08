@@ -23,8 +23,10 @@ import { deswizzle, divRoundUp, mipBlockHeightLog2 } from './swizzle'
  * rounding of the 1/3 and 2/3 endpoints is implementation-defined and differs
  * by a unit or two between vendors.
  *
- * BC6H and BC7 are deliberately absent — see isFormatSupported. ASTC lives in
- * ./astc.ts because it is an order of magnitude more code than everything here.
+ * BC6H and BC7 are deliberately absent from `isFormatSupported` — see there. ASTC lives
+ * in ./astc.ts because it is an order of magnitude more code than everything here, and a
+ * BC7 decoder exists in ./bc7.ts but is not wired in until it has been checked against
+ * the GPU; showing a magenta placeholder beats showing pixels nobody has verified.
  */
 
 export interface DecodedImage {

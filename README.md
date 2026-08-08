@@ -319,9 +319,33 @@ real image format is needed.
 
 `BC1`–`BC5`, ASTC and the uncompressed formats decode. **`BC6H` and `BC7` do
 not** — they are recognised and reported, and the pane draws a magenta checker
-rather than plausible-but-wrong pixels. BC7 in particular needs two partition
-tables and per-mode bit layouts reproduced exactly, and there were no test
-vectors to validate an implementation against.
+rather than plausible-but-wrong pixels.
+
+#### BC7: a decoder that does not pass yet
+
+There is a BC7 decoder in `formats/bntx/bc7.ts` and it is **deliberately not wired
+in**. It is wrong, and there is now a harness that says so.
+
+`EXT_texture_compression_bptc` turns out to be available in this Electron, so the GPU
+decodes BC7 natively — which makes it ground truth. The self-test finds a real BC7
+texture in a dump, deswizzles it in main, then in the renderer decodes the same blocks
+twice: once on the CPU and once by uploading them with `compressedTexImage2D`, rendering,
+and reading the pixels back. Run it with:
+
+```bash
+BFLAYOUT_SELFTEST_BC7=1 BFLAYOUT_SELFTEST_ROMFS=/path/to/romfs \
+  BFLAYOUT_SELFTEST=1 pnpm dev
+```
+
+Current state: **25% of bytes match, worst delta 249**. So the decoder has at least one
+real error — most likely in the endpoint parity bits or the anchor-index widths, where a
+mistake shifts colours without looking obviously broken. That is exactly the failure the
+harness exists to catch, and exactly why the decoder stays behind the placeholder until
+it passes. It is gated behind its own flag so the default suite is not permanently red.
+
+The partition and fix-up tables were extracted mechanically from the reference
+implementation Switch-Toolbox ships rather than retyped, since 192 rows of sixteen values
+is where a transcription error would hide.
 
 #### ASTC
 

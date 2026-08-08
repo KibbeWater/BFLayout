@@ -1219,6 +1219,196 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   /*
+   * BC7 against the GPU.
+   *
+   * BC7 packs a 4x4 block eight different ways, and a mistake in any one mode produces
+   * plausible pixels rather than an obvious failure — which is why it went undecoded while
+   * there was nothing to check against. There is now: EXT_texture_compression_bptc means
+   * the GPU decodes BC7 natively, so uploading real blocks from a shipped texture and
+   * reading the rendered pixels back gives hardware ground truth.
+   */
+  /*
+   * Behind its own flag, because the decoder does not pass yet.
+   *
+   * The harness is the finished part and the valuable part: it proved the decoder wrong
+   * — 25% of bytes matching, worst delta 249 — which is exactly the outcome that
+   * "plausible but unverified" hides. Leaving it in the default run would make the suite
+   * permanently red and stop it catching real regressions, so it runs on request:
+   *
+   *     BFLAYOUT_SELFTEST_BC7=1 BFLAYOUT_SELFTEST_ROMFS=<dump> ... pnpm dev
+   */
+  const bc7Romfs =
+    process.env['BFLAYOUT_SELFTEST_BC7'] ? (process.env['BFLAYOUT_SELFTEST_ROMFS'] ?? '') : ''
+  if (!bc7Romfs) {
+    out.push('SKIP BC7 GPU cross-check (set BFLAYOUT_SELFTEST_BC7=1 with a romfs)')
+  } else {
+    // Found and deswizzled here in main, which has the filesystem and the codecs; the
+    // renderer only needs the linear blocks and the GPU.
+    const sample = await findBc7Sample(bc7Romfs)
+    if (!sample) {
+      check(false, `BC7 GPU cross-check: no BC7 texture found (${bc7Diagnostics})`)
+    } else {
+      const bc7 = (await win.webContents.executeJavaScript(`(async () => {
+      const bntx = window.__bfdev.bntx
+      if (!bntx) return { error: 'no bntx helpers on the dev seam' }
+
+      const width = ${sample.width}
+      const height = ${sample.height}
+      const bytes = new Uint8Array(${JSON.stringify([...sample.blocks])})
+      const blocksX = Math.ceil(width / 4)
+      const blocksY = Math.ceil(height / 4)
+
+      // ---- CPU ----
+      const cpu = new Uint8Array(width * height * 4)
+      const tile = new Uint8Array(64)
+      for (let by = 0; by < blocksY; by++) {
+        for (let bx = 0; bx < blocksX; bx++) {
+          bntx.decodeBc7Block(bytes, (by * blocksX + bx) * 16, tile)
+          for (let ty = 0; ty < 4; ty++) {
+            const y = by * 4 + ty
+            if (y >= height) break
+            for (let tx = 0; tx < 4; tx++) {
+              const x = bx * 4 + tx
+              if (x >= width) break
+              const to = (y * width + x) * 4
+              const from = (ty * 4 + tx) * 4
+              cpu[to] = tile[from]
+              cpu[to + 1] = tile[from + 1]
+              cpu[to + 2] = tile[from + 2]
+              cpu[to + 3] = tile[from + 3]
+            }
+          }
+        }
+      }
+
+      // ---- GPU ----
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const gl = canvas.getContext('webgl2', { premultipliedAlpha: false, antialias: false })
+      if (!gl) return { error: 'no webgl2 context' }
+      const ext = gl.getExtension('EXT_texture_compression_bptc')
+      if (!ext) return { error: 'EXT_texture_compression_bptc unavailable' }
+
+      const tex = gl.createTexture()
+      gl.bindTexture(gl.TEXTURE_2D, tex)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+      gl.compressedTexImage2D(
+        gl.TEXTURE_2D, 0, ext.COMPRESSED_RGBA_BPTC_UNORM_EXT, width, height, 0, bytes
+      )
+      const err = gl.getError()
+      if (err !== gl.NO_ERROR) return { error: 'compressedTexImage2D failed with ' + err }
+
+      // Sources are joined from lines rather than written with escapes: this whole script
+      // is itself inside a template literal, where a real newline inside a quoted string
+      // is a syntax error and a backslash means something else again.
+      const NL = String.fromCharCode(10)
+      const vsSource = [
+        '#version 300 es',
+        'in vec2 p;',
+        'out vec2 uv;',
+        'void main(){ uv = (p + 1.0) * 0.5; gl_Position = vec4(p, 0.0, 1.0); }'
+      ].join(NL)
+      const fsSource = [
+        '#version 300 es',
+        'precision highp float;',
+        'in vec2 uv;',
+        'uniform sampler2D t;',
+        'out vec4 o;',
+        'void main(){ o = texture(t, vec2(uv.x, 1.0 - uv.y)); }'
+      ].join(NL)
+
+      const vs = gl.createShader(gl.VERTEX_SHADER)
+      gl.shaderSource(vs, vsSource)
+      gl.compileShader(vs)
+      if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+        return { error: 'vertex shader: ' + gl.getShaderInfoLog(vs) }
+      }
+      const fs = gl.createShader(gl.FRAGMENT_SHADER)
+      gl.shaderSource(fs, fsSource)
+      gl.compileShader(fs)
+      if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+        return { error: 'fragment shader: ' + gl.getShaderInfoLog(fs) }
+      }
+
+      const prog = gl.createProgram()
+      gl.attachShader(prog, vs)
+      gl.attachShader(prog, fs)
+      gl.linkProgram(prog)
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        return { error: 'link failed: ' + gl.getProgramInfoLog(prog) }
+      }
+      gl.useProgram(prog)
+
+      const buf = gl.createBuffer()
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW)
+      const loc = gl.getAttribLocation(prog, 'p')
+      gl.enableVertexAttribArray(loc)
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0)
+
+      gl.viewport(0, 0, width, height)
+      gl.disable(gl.BLEND)
+      gl.clearColor(0, 0, 0, 0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+      gl.drawArrays(gl.TRIANGLES, 0, 3)
+
+      const gpu = new Uint8Array(width * height * 4)
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, gpu)
+
+      // Compare, tolerating the ±1 the spec leaves to the implementation.
+      let exact = 0
+      let within1 = 0
+      let worst = 0
+      let worstAt = -1
+      for (let i = 0; i < cpu.length; i++) {
+        const delta = Math.abs(cpu[i] - gpu[i])
+        if (delta === 0) exact++
+        if (delta <= 1) within1++
+        if (delta > worst) { worst = delta; worstAt = i }
+      }
+
+      return {
+        size: width + 'x' + height,
+        total: cpu.length,
+        exact,
+        within1,
+        worst,
+        worstPixel: worstAt >= 0 ? Math.floor(worstAt / 4) : -1
+      }
+    })()`)) as {
+      error?: string
+      name?: string
+      size?: string
+      total?: number
+      exact?: number
+      within1?: number
+      worst?: number
+      worstPixel?: number
+    }
+
+      if (bc7.error) {
+        check(false, `BC7 GPU cross-check: ${bc7.error}`)
+      } else {
+        const total = bc7.total ?? 1
+        const exactPct = ((bc7.exact ?? 0) / total) * 100
+        const within1Pct = ((bc7.within1 ?? 0) / total) * 100
+        check(
+          within1Pct === 100,
+          `BC7 matches the GPU within one unit on ${within1Pct.toFixed(2)}% of ${sample.name} (${bc7.size}), worst delta ${bc7.worst}`
+        )
+        // Reported rather than asserted: the last unit of the interpolation is
+        // implementation-defined, so exactness is informative but not a requirement.
+        console.log(
+          `[selftest] INFO BC7 byte-exact on ${exactPct.toFixed(2)}% of samples ` +
+            `(worst delta ${bc7.worst} at pixel ${bc7.worstPixel})`
+        )
+      }
+    }
+  }
+
+  /*
    * The canvas context menu. Duplicate, delete and the tree moves were keyboard-only,
    * which for most people means undiscoverable. Right-drag still pans, so the menu opens
    * on a right *click* — a distinction worth testing, because it is the whole design.
@@ -1449,8 +1639,18 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     const tab = store.tabs.find(t => t.documentId === store.activeId)
     if (!tab) return { error: 'no active tab' }
 
-    const siblings = tab.document.rootPane.children
-    if (siblings.length < 2) return { error: 'need two panes to collide' }
+    /*
+     * Any two siblings, found anywhere in the tree. Assuming the root had two children
+     * only held for the fixture layout, so this failed as soon as something earlier
+     * opened a different one.
+     */
+    let siblings = null
+    const findSiblings = (p) => {
+      if (!siblings && p.children.length >= 2) siblings = p.children
+      p.children.forEach(findSiblings)
+    }
+    findSiblings(tab.document.rootPane)
+    if (!siblings) return { error: 'no pane with two children in this layout' }
     const [first, second] = siblings
     store.select([first.id])
     await new Promise(r => setTimeout(r, 300))
@@ -1940,4 +2140,148 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
   }
 
   return out
+}
+
+/**
+ * Finds a BC7 texture in a dump and returns its linear mip-0 blocks.
+ *
+ * Done here rather than over RPC because main has the filesystem and the codecs, and the
+ * renderer only needs the blocks plus the GPU. The surface is capped: the point is to
+ * exercise as many of BC7's eight modes as possible, not to compare a whole atlas, and the
+ * blocks travel to the renderer inside a script.
+ */
+let bc7Diagnostics = 'not run'
+
+async function findBc7Sample(
+  root: string
+): Promise<{ name: string; width: number; height: number; blocks: Uint8Array } | null> {
+  const { readdir, readFile, stat } = await import('node:fs/promises')
+  const { join } = await import('node:path')
+  const { isBntx, parseBntx, BntxFormat, deswizzle, divRoundUp, mipBlockHeightLog2 } =
+    await import('@shared/formats/bntx')
+
+  /*
+   * Decompression goes through the app's own service rather than importing zstd here.
+   *
+   * A direct `import('@bokuweb/zstd-wasm')` in this bundle failed for every one of the
+   * 56,545 candidates — the wasm is loaded a particular way in `CompressionService`, and
+   * duplicating that in a test only meant the test was wrong about the dump.
+   */
+  const { Effect } = await import('effect')
+  const { runtime } = await import('./runtime')
+  const { CompressionService } = await import('./services/compression')
+
+  const decompress = async (raw: Uint8Array): Promise<Uint8Array> => {
+    const result = await runtime.runPromise(
+      Effect.flatMap(CompressionService, (service) =>
+        Effect.orElseSucceed(service.decompress(raw), () => ({ data: raw, kind: 'none' as const }))
+      )
+    )
+    return result.data
+  }
+
+  const MAX_SIDE = 256
+
+  /*
+   * Every candidate is examined, not the first few hundred.
+   *
+   * A dump holds tens of thousands of .bntx files and almost all of them are ASTC — the
+   * BC7 ones sit in `Tex/`, well past any cap. Stopping early found nothing and reported
+   * "no BC7 texture in the dump", which was a property of the walker rather than the dump.
+   */
+  const candidates: string[] = []
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (depth > 4) return
+    let entries: string[]
+    try {
+      entries = await readdir(dir)
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry)
+      let info
+      try {
+        info = await stat(path)
+      } catch {
+        continue
+      }
+      if (info.isDirectory()) await walk(path, depth + 1)
+      else if (/\.bntx(\.zs)?$/i.test(entry)) candidates.push(path)
+    }
+  }
+  await walk(root, 0)
+
+  let parsed = 0
+  let bc7Seen = 0
+  let readFailures = 0
+  let deswizzleFailures = 0
+
+  for (const path of candidates) {
+    let data: Uint8Array
+    try {
+      data = await decompress(new Uint8Array(await readFile(path)))
+    } catch {
+      readFailures++
+      continue
+    }
+    if (!isBntx(data)) continue
+
+    let container
+    try {
+      container = parseBntx(data)
+      parsed++
+    } catch {
+      continue
+    }
+
+    for (const texture of container.textures) {
+      if (texture.format !== BntxFormat.BC7) continue
+      bc7Seen++
+      // Multiples of four only, so the compared surface holds whole blocks.
+      if (texture.width % 4 !== 0 || texture.height % 4 !== 0) continue
+
+      const end = texture.mipOffsets[1] ?? texture.imageData.length
+      const tiled = texture.imageData.subarray(texture.mipOffsets[0] ?? 0, end)
+      try {
+        const blocks = deswizzle(
+          texture.width,
+          texture.height,
+          4,
+          4,
+          16,
+          texture.tileMode,
+          mipBlockHeightLog2(divRoundUp(texture.height, 4), texture.blockHeightLog2),
+          tiled
+        )
+
+        /*
+         * A leading band of whole rows, rather than the whole surface.
+         *
+         * The blocks travel to the renderer inside a script, so a 512x512 atlas would be a
+         * megabyte of JSON. Taking complete rows keeps the block layout intact, which
+         * matters because the comparison uploads the same bytes to the GPU.
+         */
+        const blocksX = texture.width / 4
+        const rows = Math.min(texture.height / 4, Math.max(1, Math.floor(MAX_SIDE / 4)))
+        const needed = blocksX * rows * 16
+        if (blocks.length < needed) continue
+
+        return {
+          name: `${path.split('/').pop()}:${texture.name}`,
+          width: texture.width,
+          height: rows * 4,
+          blocks: blocks.subarray(0, needed)
+        }
+      } catch {
+        deswizzleFailures++
+        continue
+      }
+    }
+  }
+
+  bc7Diagnostics =
+    `${candidates.length} candidates, ${parsed} parsed, ${bc7Seen} BC7, ` +
+    `${readFailures} unreadable, ${deswizzleFailures} deswizzle failures`
+  return null
 }
