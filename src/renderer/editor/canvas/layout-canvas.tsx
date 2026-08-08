@@ -517,6 +517,15 @@ export function LayoutCanvas(): ReactNode {
         case 'toggle-textures':
           setShowTextures((value) => !value)
           break
+        /*
+         * A texture entry was replaced in an archive. Main's cache is keyed by the entry's bytes
+         * so it invalidates itself, but the uploaded GL textures here are keyed by name and
+         * would keep drawing the old art.
+         */
+        case 'textures-changed':
+          rendererRef.current?.textures.invalidate()
+          draw()
+          break
         case 'fit':
           fitRef.current?.()
           break

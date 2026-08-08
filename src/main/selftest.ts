@@ -1195,6 +1195,16 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       }
     }
 
+    /*
+     * Identical bytes must not dirty the archive. Extract-then-reimport is a no-op, and dirtying
+     * on it made the doc's claim false in a way that mattered: the archive would demand a save,
+     * refuse to close, and count against the quit prompt, all for a change that was not one.
+     */
+    const identicalLeftClean = !after.dirty
+
+    // Saving is reachable without a layout tab, which is what makes any of this recoverable.
+    const saved = await c.archive.save({ archiveId })
+
     return {
       name: entry.displayName,
       extracted: written.bytes,
@@ -1203,6 +1213,8 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
       detected: result.detected,
       sizeHeld: sameEntry ? sameEntry.size : -1,
       count: after.entries.length === before.entries.length,
+      identicalLeftClean,
+      savedClean: saved.dirty === false,
       openRefused,
       unnamedRefused
     }
@@ -1215,6 +1227,8 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     detected?: string
     sizeHeld?: number
     count?: boolean
+    identicalLeftClean?: boolean
+    savedClean?: boolean
     openRefused?: boolean | null
     unnamedRefused?: boolean | null
   }
@@ -1237,6 +1251,15 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     check(
       entryIo.openRefused === true,
       'replacing the entry a tab is editing is refused, so a later save cannot undo the import'
+    )
+    check(
+      entryIo.identicalLeftClean === true,
+      'importing identical bytes left the archive clean rather than demanding a save'
+    )
+    // Without this an archive with no openable layout could be dirtied and never written.
+    check(
+      entryIo.savedClean === true,
+      'an archive can be saved directly, with no layout tab involved'
     )
     if (entryIo.unnamedRefused === null) {
       out.push('SKIP unnamed entry replacement refusal (every entry in this archive is named)')
@@ -3378,15 +3401,78 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
    * close handler is synchronous and cannot ask at the last moment. Before this
    * existed, Cmd+W discarded every unsaved layout without a word.
    */
-  // Start from a clean slate: earlier checks leave edited tabs behind, and with a
-  // romfs pointed at there is more than one, so a bare "count went up" is unstable.
+  /*
+   * Start from a clean slate. Earlier checks leave edited tabs behind, and with a romfs pointed
+   * at there is more than one, so a bare "count went up" is unstable.
+   *
+   * *Archives* are cleaned too, because the count main receives is unsaved tabs **plus** dirty
+   * archives: an archive holds changes of its own — a layout save or an entry replacement both
+   * leave bytes that exist nowhere else — and counting only tabs meant quitting discarded them
+   * silently, which is exactly the loss the archive's close refusal exists to prevent.
+   */
   await win.webContents.executeJavaScript(`(async () => {
+    const c = window.__bfclient
     const store = window.__bfdev.documents.getState()
     for (const tab of store.tabs) store.markSaved(tab.documentId)
-    await new Promise(r => setTimeout(r, 300))
+    for (const archive of await c.archive.list()) {
+      if (archive.dirty) await c.archive.save({ archiveId: archive.archiveId })
+    }
+    // Past the guard's archive poll, so the cleaned state has reached main.
+    await new Promise(r => setTimeout(r, 4500))
   })()`)
   const unsavedBefore = getUnsavedCount()
-  check(unsavedBefore === 0, `every tab starts clean (${unsavedBefore} unsaved)`)
+  check(
+    unsavedBefore === 0,
+    `every tab and archive starts clean (${unsavedBefore} unsaved)`
+  )
+
+  /*
+   * A dirty archive on its own has to reach main's quit guard.
+   *
+   * The guard reads a count the renderer pushes, and that count was tabs only — so an archive
+   * dirtied with no dirty tab (an entry replacement, or a layout save whose archive step failed)
+   * was discarded on quit without a prompt, while the archive's own close refusal implied it was
+   * being protected. Half a guard is worse than none.
+   */
+  const archiveGuard = (await win.webContents.executeJavaScript(`(async () => {
+    const c = window.__bfclient
+    const dev = window.__bfdev
+    const store = dev.documents.getState()
+    const tab = store.tabs.find(t => t.documentId === store.activeId)
+    if (!tab || tab.source.kind !== 'archive') return { skipped: 'no archive-backed tab' }
+
+    // A layout save dirties the archive without leaving the tab dirty.
+    await c.layout.save({ documentId: tab.documentId, document: tab.document })
+    dev.documents.getState().markSaved(tab.documentId, dev.documents.getState().tabs.find(t => t.documentId === tab.documentId).revision)
+    await new Promise(r => setTimeout(r, 4500))
+
+    const tabsDirty = dev.documents.getState().tabs.filter(t => t.unsaved).length
+    const archivesDirty = (await c.archive.list()).filter(a => a.dirty).length
+    return { tabsDirty, archivesDirty }
+  })()`)) as { skipped?: string; tabsDirty?: number; archivesDirty?: number }
+
+  if (archiveGuard.skipped) {
+    out.push(`SKIP dirty-archive quit guard (${archiveGuard.skipped})`)
+  } else {
+    const reported = getUnsavedCount()
+    check(
+      archiveGuard.tabsDirty === 0 && (archiveGuard.archivesDirty ?? 0) > 0,
+      `a layout save left the archive dirty with no dirty tab (${archiveGuard.tabsDirty} tabs, ${archiveGuard.archivesDirty} archives)`
+    )
+    check(
+      reported > 0,
+      `main was told about it, so quitting prompts rather than discarding (count ${reported})`
+    )
+
+    // Put it back: the checks after this one read the same count and would inherit the dirt.
+    await win.webContents.executeJavaScript(`(async () => {
+      const c = window.__bfclient
+      for (const archive of await c.archive.list()) {
+        if (archive.dirty) await c.archive.save({ archiveId: archive.archiveId })
+      }
+      await new Promise(r => setTimeout(r, 4500))
+    })()`)
+  }
 
   await win.webContents.executeJavaScript(`(async () => {
     // mutate's recipe receives the tab, not the document.

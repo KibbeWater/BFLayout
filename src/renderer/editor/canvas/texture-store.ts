@@ -123,6 +123,23 @@ export class TextureStore {
     entries.set(name, entry)
   }
 
+  /**
+   * Drops everything cached for the current source, so the next draw refetches.
+   *
+   * Needed because a texture can change underneath a loaded layout: replacing a `.bntx` entry in
+   * the archive leaves main's cache correctly invalidated — it is keyed by the entry's bytes —
+   * while this one still holds the uploaded GL texture under the same name. The canvas kept
+   * drawing the old art, so the import either looked like it had failed or, worse, got saved
+   * alongside pixels the user had never seen.
+   */
+  invalidate(): void {
+    if (!this.source) return
+    const entries = this.bySource.get(sourceKey(this.source))
+    if (!entries) return
+    this.release(entries)
+    this.onChanged()
+  }
+
   private release(entries: Map<string, Entry>): void {
     for (const entry of entries.values()) {
       if (entry.texture) this.gl.deleteTexture(entry.texture)

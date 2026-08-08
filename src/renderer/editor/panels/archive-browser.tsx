@@ -52,6 +52,7 @@ export function ArchiveBrowser(): ReactNode {
   const tabs = useDocuments((state) => state.tabs)
   const [closing, setClosing] = useState(false)
   const [busyEntry, setBusyEntry] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
   const queryClient = useQueryClient()
 
   const archive = useQuery({
@@ -70,6 +71,29 @@ export function ArchiveBrowser(): ReactNode {
   const openFromHere = tabs.filter(
     (tab) => tab.source.kind === 'archive' && tab.source.archiveId === archiveId
   )
+
+  /**
+   * Writes the archive to disk.
+   *
+   * Every path that dirties an archive needs one of these, and until now the only one went
+   * through a layout tab's save — so an archive holding nothing openable could be dirtied and
+   * never written.
+   */
+  const saveArchive = (): void => {
+    if (!archiveId) return
+    setSaving(true)
+    void (async () => {
+      try {
+        const saved = await getClient().archive.save({ archiveId })
+        await queryClient.invalidateQueries({ queryKey: orpc.archive.get.key() })
+        reportSuccess('Saved', `${saved.displayName} written to disk.`)
+      } catch (cause) {
+        reportError(cause, { retry: saveArchive })
+      } finally {
+        setSaving(false)
+      }
+    })()
+  }
 
   const closeArchive = (): void => {
     if (!archiveId) return
@@ -144,7 +168,20 @@ export function ArchiveBrowser(): ReactNode {
           entryKey: entry.key,
           path
         })
-        await queryClient.invalidateQueries({ queryKey: orpc.archive.get.key() })
+        /*
+         * Everything that could be holding the old bytes is told to forget them: the archive
+         * descriptor, the texture list and decoded textures, and — through the command the
+         * canvas already listens for — the uploaded GL textures, which are keyed by name and
+         * would otherwise keep drawing the old art. A replaced texture that still looks
+         * unchanged reads as a failed import.
+         */
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: orpc.archive.get.key() }),
+          queryClient.invalidateQueries({ queryKey: orpc.textures.list.key() }),
+          queryClient.invalidateQueries({ queryKey: orpc.textures.get.key() })
+        ])
+        window.dispatchEvent(new CustomEvent('bflayout-command', { detail: 'textures-changed' }))
+
         reportSuccess(
           'Replaced',
           `${entry.displayName} now holds ${result.bytes} bytes (${result.detected}). ` +
@@ -229,6 +266,25 @@ export function ArchiveBrowser(): ReactNode {
             a sweep silently un-textured panes, and rewrote the saved session to drop the
             archive for good. A button the user presses cannot be wrong about intent.
           */}
+          {/*
+            Saving an archive was only reachable as step two of saving a layout tab, which meant
+            an archive with no openable layout — a shared texture archive, the headline case for
+            Replace — could be made dirty and then never written: no tab to save through, Close
+            refusing because it is dirty, and quit discarding it. This is the missing door.
+          */}
+          <button
+            type="button"
+            onClick={saveArchive}
+            disabled={saving || !data.dirty}
+            title={
+              data.dirty
+                ? 'Write this archive to disk'
+                : 'This archive has no unsaved changes'
+            }
+            className="shrink-0 rounded border px-1.5 py-0.5 text-[11px] hover:bg-accent disabled:opacity-40"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
           <button
             type="button"
             onClick={closeArchive}
@@ -253,7 +309,8 @@ export function ArchiveBrowser(): ReactNode {
         {data.unnamedCount > 0 ? (
           <p className="mt-1 rounded bg-muted px-1.5 py-1 text-[11px] text-muted-foreground">
             {data.unnamedCount} of {data.entries.length} entries have no stored name. They are
-            listed by hash and can be read but not replaced until a name is recovered.
+            listed by hash and can be extracted, but nothing in this archive can be replaced:
+            writing a SARC needs every name, so a change here could never be saved.
           </p>
         ) : null}
       </div>
@@ -344,11 +401,13 @@ export function ArchiveBrowser(): ReactNode {
                       <button
                         type="button"
                         onClick={() => importEntry(entry)}
-                        disabled={busyEntry !== null || !entry.named}
+                        disabled={busyEntry !== null || !entry.named || data.unnamedCount > 0}
                         title={
-                          entry.named
-                            ? `Replace ${entry.displayName} from a file`
-                            : 'This entry has no stored name, so it cannot be replaced'
+                          !entry.named
+                            ? 'This entry has no stored name, so it cannot be replaced'
+                            : data.unnamedCount > 0
+                              ? 'This archive holds entries with no stored name, so it cannot be written back at all — replacing anything in it would produce changes that can never be saved'
+                              : `Replace ${entry.displayName} from a file`
                         }
                         className="rounded border bg-background px-1 py-0.5 text-[10px] hover:bg-accent disabled:opacity-40"
                       >

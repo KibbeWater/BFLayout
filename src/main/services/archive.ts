@@ -166,8 +166,32 @@ export class ArchiveService extends Effect.Service<ArchiveService>()('ArchiveSer
             })
           )
         }
+
+        /*
+         * A named entry is not enough: writing a SARC needs *every* name, so one unnamed entry
+         * anywhere makes the whole archive unwritable. Replacing something in it would produce
+         * changes that could never be saved — and, since a dirty archive refuses to close, no
+         * way out but quitting and losing them. Refused up front instead.
+         */
+        const unnamed = session.archive.entries.filter((candidate) => candidate.name === null)
+        if (unnamed.length > 0) {
+          return yield* Effect.fail(
+            new FormatWriteError({
+              format: 'sarc',
+              section: key,
+              message: `${unnamed.length} of ${session.archive.entries.length} entries in ${basename(session.path)} have no stored name, so this archive cannot be written back at all`
+            })
+          )
+        }
+
         session.archive = replaceSarcEntry(session.archive, entry.name, data)
-        session.dirty = true
+        /*
+         * Identical bytes leave the archive alone. Extract-then-reimport is a no-op — the doc
+         * above says so — and dirtying on it made that claim false: the archive would demand a
+         * save, refuse to close, and count against the quit prompt, all for a change that was
+         * not one.
+         */
+        if (!sameBytes(entry.data, data)) session.dirty = true
         return describe(session)
       })
 
@@ -316,4 +340,10 @@ function describeBytes(data: Uint8Array): string {
   const magic = String.fromCharCode(...data.subarray(0, 4))
   if (/^[\x20-\x7e]{4}$/.test(magic)) return magic
   return 'unrecognised'
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false
+  for (let at = 0; at < a.length; at++) if (a[at] !== b[at]) return false
+  return true
 }

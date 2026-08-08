@@ -392,10 +392,24 @@ not started. Doing it properly needs a BNTX writer, a BCn/ASTC **compressor** an
 Tegra swizzle — none of which exist here, and all of which are large. Swapping in a `.bntx`
 built in another tool needs none of them.
 
+Getting this right took a second pass, and the shape of the mistake is worth recording. The
+first version created dirty archives in places the save UI could not reach: saving an archive
+was only ever step two of saving a *layout tab*, so an archive with no openable layout — a
+shared texture archive, the headline case for Replace — could be dirtied and then never written.
+The archive's own close refusal, added just before, then blocked the only remaining exit, and
+the quit prompt counted unsaved *tabs* only, so quitting discarded the import without a word.
+Three separate changes, each defensible, compounding into a dead end.
+
+So: the browser header has a **Save**, the quit count includes dirty archives, and importing
+byte-identical bytes leaves the archive clean rather than demanding a save for a change that was
+not one.
+
 Three refusals are deliberate.
 
-An entry whose name could not be recovered **cannot** be replaced, because the SARC writer
-addresses entries by name; the row says so rather than failing opaquely.
+**Nothing** in an archive with unrecovered names can be replaced — not just the unnamed entries.
+Writing a SARC needs every name, so one unnamed entry anywhere makes the whole archive
+unwritable, and replacing a *named* entry in it would produce changes that could never be saved.
+Refusing only the unnamed rows would have invited exactly the click that creates that trap.
 
 Replacing the entry a **tab is currently editing** is refused too, and this one is the
 interesting case: that tab holds its own copy of the layout, so its next save re-encodes *that*
@@ -476,6 +490,11 @@ differently:
   cannot see the document store, so the renderer pushes its unsaved count over RPC and
   `BrowserWindow.on('close')` reads it synchronously, which it must: the only way to stop
   a close is to `preventDefault` during the event.
+- **A dirty archive** counts toward the prompt as well as a dirty tab. An archive holds changes
+  of its own — a layout save writes its re-encoded entry into it, and replacing an entry does the
+  same — and both leave bytes that exist nowhere else. Counting tabs alone meant those were
+  discarded on quit in silence while the archive's close refusal implied they were protected,
+  which is worse than no guard at all.
 - **A crash or a kill** is covered by recovery snapshots. On a debounced timer, any tab
   holding unsaved edits has its *document* written to sqlite — the document's own JSON,
   not encoded layout bytes, so the editing state comes back exactly, including a document

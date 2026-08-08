@@ -45,8 +45,45 @@ export function useUnsavedGuard(saveDocument: (documentId: string) => Promise<bo
     const countUnsaved = (): number =>
       useDocuments.getState().tabs.filter((tab) => tab.unsaved).length
 
-    push(countUnsaved())
-    return useDocuments.subscribe(() => push(countUnsaved()))
+    /*
+     * Dirty *archives* count too, not just dirty tabs.
+     *
+     * An archive holds unsaved changes of its own: a layout save writes the re-encoded entry
+     * into it, and replacing an entry from a file does the same — both leave bytes that exist
+     * nowhere but memory. Neither necessarily leaves a dirty tab, so counting tabs alone meant
+     * quitting discarded them without a word, which is precisely the loss the archive's own
+     * close refusal exists to prevent. Half a guard is worse than none, because the refusal
+     * implies the other half is there.
+     *
+     * Polled rather than subscribed: archives live in main and nothing pushes their state, and
+     * a few seconds of staleness only matters at the moment of quitting, which this keeps
+     * current enough for.
+     */
+    let dirtyArchives = 0
+    const total = (): number => countUnsaved() + dirtyArchives
+
+    const pollArchives = (): void => {
+      void getClient()
+        .archive.list()
+        .then((archives) => {
+          const next = archives.filter((archive) => archive.dirty).length
+          if (next === dirtyArchives) return
+          dirtyArchives = next
+          push(total())
+        })
+        .catch(() => {
+          // An unreachable main process is not something to report from a poll.
+        })
+    }
+
+    push(total())
+    pollArchives()
+    const timer = setInterval(pollArchives, 4000)
+    const unsubscribe = useDocuments.subscribe(() => push(total()))
+    return () => {
+      clearInterval(timer)
+      unsubscribe()
+    }
   }, [])
 
   const closeTabSafely = useCallback(
