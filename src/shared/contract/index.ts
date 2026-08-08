@@ -93,10 +93,29 @@ export const appContract = {
     get: base.output(workspaceSnapshotSchema),
     set: base.input(workspaceSnapshotSchema).output(okSchema),
     clear: base.output(okSchema)
-  }
+  },
+  /**
+   * Tells main how many tabs hold unsaved edits.
+   *
+   * Main cannot see the document store, but it owns window close and application
+   * quit — both of which used to discard unsaved work without a word. Pushing the
+   * count on every change means the close handler can answer synchronously, which
+   * it has to: `win.on('close')` cannot await a round trip to the renderer.
+   */
+  setUnsavedCount: base.input(z.object({ count: z.number().int().min(0) })).output(okSchema)
 }
 
 export const dialogContract = {
+  /**
+   * Asks whether to save, discard, or keep editing before losing changes.
+   *
+   * A native modal rather than an in-app one because it guards a destructive
+   * action: it must be impossible to miss, and it must be able to block a window
+   * that is already on its way out.
+   */
+  confirmDiscard: base
+    .input(z.object({ name: z.string(), scope: z.enum(['tab', 'window']) }))
+    .output(z.object({ choice: z.enum(['save', 'discard', 'cancel']) })),
   openFolder: base
     .output(z.object({ canceled: z.boolean(), path: z.string().nullable() })),
   openFiles: base

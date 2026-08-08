@@ -24,9 +24,9 @@ import { Splitter } from '@renderer/components/splitter'
 /** Controls inside a drag region need this or they cannot be clicked. */
 const NO_DRAG = { WebkitAppRegion: 'no-drag' } as CSSProperties
 
-import { getClient } from '@renderer/lib/orpc'
 import { useOpenFile } from '@renderer/lib/use-open-file'
 import { useSave } from '@renderer/lib/use-save'
+import { useUnsavedGuard } from '@renderer/lib/use-unsaved-guard'
 import { useSessionSnapshot } from '@renderer/lib/use-session'
 import { useActiveTab, useDocuments } from '@renderer/editor/store/document'
 import { useFolder } from '@renderer/editor/store/folder'
@@ -160,7 +160,7 @@ export function EditorScreen(): ReactNode {
 function useMenuCommands(): void {
   const panels = usePanels()
   const { openViaDialog, openFolderViaDialog } = useOpenFile()
-  const { save, saveAs } = useSave()
+  const { save, saveAs, saveAll } = useSave()
   const undo = useDocuments((state) => state.undo)
   const redo = useDocuments((state) => state.redo)
 
@@ -181,6 +181,11 @@ function useMenuCommands(): void {
           break
         case 'save-as':
           saveAs()
+          break
+        // Sent by main when the window is closing with unsaved work; it waits for
+        // the tabs to go clean before letting the close through.
+        case 'save-all':
+          void saveAll()
           break
         case 'undo':
           undo()
@@ -212,7 +217,7 @@ function useMenuCommands(): void {
           break
       }
     })
-  }, [panels, openViaDialog, openFolderViaDialog, save, saveAs, undo, redo])
+  }, [panels, openViaDialog, openFolderViaDialog, save, saveAs, saveAll, undo, redo])
 }
 
 const PANEL_KEYS: readonly PanelKey[] = [
@@ -414,7 +419,10 @@ function DocumentTabs(): ReactNode {
   const tabs = useDocuments((state) => state.tabs)
   const activeId = useDocuments((state) => state.activeId)
   const setActive = useDocuments((state) => state.setActive)
-  const closeTab = useDocuments((state) => state.closeTab)
+  const { saveDocument } = useSave()
+  // Closing goes through the guard, which asks before discarding unsaved edits and
+  // releases the document in main once the tab is really gone.
+  const { closeTabSafely } = useUnsavedGuard(saveDocument)
 
   if (tabs.length === 0) return null
 
@@ -433,14 +441,7 @@ function DocumentTabs(): ReactNode {
           </button>
           <button
             type="button"
-            onClick={() => {
-              closeTab(tab.documentId)
-              void getClient()
-                .layout.close({ documentId: tab.documentId })
-                .catch((cause: unknown) =>
-                  console.warn('[bflayout] could not release document:', cause)
-                )
-            }}
+            onClick={() => void closeTabSafely(tab.documentId)}
             className="rounded p-0.5 opacity-0 hover:bg-accent group-hover:opacity-100"
             aria-label={`Close ${tab.displayName}`}
           >

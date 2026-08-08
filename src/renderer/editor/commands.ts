@@ -103,6 +103,83 @@ export function setPaneFields(
   }
 }
 
+/**
+ * Everything about a pane except its children, deep-cloned.
+ *
+ * `setPaneFields` only knows the ten fields the canvas drags, which left every
+ * properties-panel edit — text content, font size, material index, texture SRT,
+ * blend mode, vertex colours, the lot — outside undo entirely. Rather than
+ * enumerate each pane kind's fields, snapshot the whole node: panes are small once
+ * their children are excluded, and this cannot fall behind the model.
+ *
+ * The clone is deep because nested values like `textureSrt` and a window pane's
+ * frames are mutated in place; a shallow copy would alias the snapshot to the live
+ * object and undo would restore the edited values.
+ */
+export type PaneSnapshot = Record<string, unknown>
+
+export function snapshotPane(pane: Pane): PaneSnapshot {
+  const { children: _children, ...rest } = pane as Pane & { children: unknown }
+  return structuredClone(rest) as PaneSnapshot
+}
+
+/**
+ * Restores a whole pane, for edits that can touch any field.
+ *
+ * Children and identity are deliberately left alone: this command describes what a
+ * property edit changed, and reparenting or deleting is someone else's job.
+ */
+export function setPaneSnapshot(
+  paneId: string,
+  label: string,
+  before: PaneSnapshot,
+  after: PaneSnapshot
+): Command {
+  const restore = (document: LayoutDocument, snapshot: PaneSnapshot): void => {
+    const pane = findPane(document.rootPane, (candidate) => candidate.id === paneId)
+    if (!pane) return
+    const { children: _children, id: _id, ...fields } = structuredClone(snapshot) as {
+      children?: unknown
+      id?: unknown
+    }
+    Object.assign(pane, fields)
+    pane.dirty = true
+  }
+
+  return {
+    label,
+    apply: (document) => restore(document, after),
+    invert: (document) => restore(document, before)
+  }
+}
+
+/**
+ * Restores a material, for the same reason as `setPaneSnapshot`.
+ *
+ * Materials are addressed by index rather than by identity because that is how
+ * panes reference them; a command that outlived a reordering would be wrong either
+ * way, and reordering materials is not something the editor can do.
+ */
+export function setMaterialSnapshot(
+  index: number,
+  label: string,
+  before: PaneSnapshot,
+  after: PaneSnapshot
+): Command {
+  const restore = (document: LayoutDocument, snapshot: PaneSnapshot): void => {
+    const material = document.materials[index]
+    if (!material) return
+    Object.assign(material, structuredClone(snapshot))
+    material.dirty = true
+  }
+
+  return {
+    label,
+    apply: (document) => restore(document, after),
+    invert: (document) => restore(document, before)
+  }
+}
+
 export interface UndoStack {
   readonly undo: Command[]
   readonly redo: Command[]

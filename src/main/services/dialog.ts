@@ -107,6 +107,48 @@ export class DialogService extends Effect.Service<DialogService>()('DialogServic
           })
       })
 
-    return { openFiles, openFolder, saveFileAs } as const
+    /**
+     * Confirms before unsaved edits are thrown away.
+     *
+     * Cancel is both the default and the escape action, so a stray Return or Escape
+     * keeps the work rather than losing it. "Discard" is flagged destructive, which
+     * macOS renders in red.
+     */
+    const confirmDiscard = (options: { name: string; scope: 'tab' | 'window' }) =>
+      Effect.tryPromise({
+        try: async () => {
+          const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+          const config: Electron.MessageBoxOptions = {
+            type: 'warning',
+            buttons: ['Save', 'Discard', 'Cancel'],
+            defaultId: 2,
+            cancelId: 2,
+            noLink: true,
+            message:
+              options.scope === 'tab'
+                ? `Save your changes to ${options.name}?`
+                : `Save your changes before closing?`,
+            detail:
+              options.scope === 'tab'
+                ? 'If you discard them, your edits to this layout are lost.'
+                : `${options.name} has unsaved edits. If you discard them, they are lost.`
+          }
+
+          const result = parent
+            ? await dialog.showMessageBox(parent, config)
+            : await dialog.showMessageBox(config)
+
+          const choice = (['save', 'discard', 'cancel'] as const)[result.response] ?? 'cancel'
+          return { choice }
+        },
+        catch: (cause) =>
+          new IoError({
+            detail: `could not ask about unsaved changes: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }`
+          })
+      })
+
+    return { openFiles, openFolder, saveFileAs, confirmDiscard } as const
   }
 }) {}

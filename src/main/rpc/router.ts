@@ -12,6 +12,7 @@ import { SettingsService } from '@main/services/settings'
 import { TextureService } from '@main/services/textures'
 import { WindowStateService } from '@main/services/window-state'
 import { WorkspaceService } from '@main/services/workspace'
+import { setUnsavedCount } from '@main/unsaved'
 import { run } from './run'
 
 const os = implement(contract)
@@ -86,7 +87,20 @@ const workspace = {
   })
 }
 
+/**
+ * The renderer's unsaved-tab count, mirrored into main so the window-close and
+ * quit handlers can see it. See src/main/unsaved.ts for why it is not a service.
+ */
+const setUnsaved = os.app.setUnsavedCount.handler(({ input }) => {
+  setUnsavedCount(input.count)
+  return ok
+})
+
 const dialogRoutes = {
+  confirmDiscard: os.dialog.confirmDiscard.handler(({ input }) =>
+    run(Effect.flatMap(DialogService, (s) => s.confirmDiscard(input)))
+  ),
+
   openFiles: os.dialog.openFiles.handler(({ input }) =>
     run(
       Effect.flatMap(DialogService, (s) =>
@@ -188,7 +202,7 @@ const animationRoutes = {
 }
 
 export const router = os.router({
-  app: { settings, recents, windowState, workspace },
+  app: { settings, recents, windowState, workspace, setUnsavedCount: setUnsaved },
   dialog: dialogRoutes,
   archive: archiveRoutes,
   layout: layoutRoutes,

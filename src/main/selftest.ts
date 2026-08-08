@@ -1,6 +1,8 @@
 import { writeFile } from 'node:fs/promises'
 import { app, type BrowserWindow } from 'electron'
 
+import { getUnsavedCount } from './unsaved'
+
 /**
  * Dev-only end-to-end check driven from the main process: it runs real RPC
  * calls inside the renderer so the whole chain — MessagePort transport, zod
@@ -913,6 +915,26 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     return document.querySelectorAll('aside').length
   })()`)) as number
   check(afterMenuShow === menuResult, `the menu restored the region (${afterMenuShow})`)
+
+  /*
+   * The renderer must keep main informed about unsaved work, because the window
+   * close handler is synchronous and cannot ask at the last moment. Before this
+   * existed, Cmd+W discarded every unsaved layout without a word.
+   */
+  await win.webContents.executeJavaScript(`(async () => {
+    // mutate's recipe receives the tab, not the document.
+    window.__bfdev.documents.getState().mutate((tab) => {
+      tab.document.rootPane.name = 'DirtiedBySelfTest'
+    })
+    await new Promise(r => setTimeout(r, 300))
+  })()`)
+  check(getUnsavedCount() > 0, `main learned about unsaved work (${getUnsavedCount()} tab(s))`)
+
+  await win.webContents.executeJavaScript(`(async () => {
+    window.__bfdev.documents.getState().markSaved()
+    await new Promise(r => setTimeout(r, 300))
+  })()`)
+  check(getUnsavedCount() === 0, 'main learned the work was saved')
 
   // Fit and deselect before the capture, so the screenshot shows the layout rather
   // than whatever corner the camera happened to be in.

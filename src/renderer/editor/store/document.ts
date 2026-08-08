@@ -64,7 +64,8 @@ interface DocumentStore {
   runCommand: (command: Command) => void
   undo: () => void
   redo: () => void
-  markSaved: () => void
+  /** Clears the unsaved flag on one tab, or the active one when omitted. */
+  markSaved: (documentId?: string) => void
   /** Points a tab at a new file after a save-as. */
   retarget: (documentId: string, source: LayoutSource, displayName: string) => void
 }
@@ -204,10 +205,10 @@ export const useDocuments = create<DocumentStore>((set, get) => ({
       })
     })),
 
-  markSaved: () =>
+  markSaved: (documentId?: string) =>
     set((state) => ({
       tabs: state.tabs.map((tab) =>
-        tab.documentId === state.activeId ? { ...tab, unsaved: false } : tab
+        tab.documentId === (documentId ?? state.activeId) ? { ...tab, unsaved: false } : tab
       )
     })),
 
