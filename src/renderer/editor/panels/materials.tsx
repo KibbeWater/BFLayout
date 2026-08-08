@@ -1,4 +1,4 @@
-import { type ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 
 import type { LayoutDocument, Material, Pane, Rgba } from '@shared/formats/bflyt'
 import { walkPanes } from '@shared/formats/bflyt'
@@ -27,7 +27,10 @@ export function MaterialsPanel(): ReactNode {
     return <p className="p-3 text-xs text-muted-foreground/60">This layout has no materials.</p>
   }
 
-  const users = collectUsers(tab.document)
+  // A full tree walk, so it is kept off the render path of every canvas drag
+  // frame: the store bumps `revision` on each mutation, and nothing else can
+  // change who uses a material.
+  const users = useMemo(() => collectUsers(tab.document), [tab.document, tab.revision])
 
   return (
     <div className="min-h-0 flex-1 overflow-auto">

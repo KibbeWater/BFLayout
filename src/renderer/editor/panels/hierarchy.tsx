@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   ChevronDown,
   ChevronRight,
@@ -58,6 +58,7 @@ export function HierarchyPanel(): ReactNode {
     if (firstSelected) revealPane(firstSelected)
   }, [firstSelected, revealPane])
 
+
   if (!tab) {
     return (
       <div className="flex flex-1 items-center justify-center p-4 text-center text-xs text-muted-foreground/60">
@@ -109,6 +110,16 @@ function PaneActions(): ReactNode {
   const selectedId = tab?.selectedPaneIds[0]
   const selected = tab && selectedId ? paneById(tab.document, selectedId) : null
   const isRoot = selected !== null && selected?.id === tab?.document.rootPane?.id
+
+  // A full tree walk. This toolbar re-renders on every store change, which during
+  // a canvas drag means sixty times a second, so the count is memoised on the
+  // revision the store bumps for each mutation.
+  const document = tab?.document
+  const revision = tab?.revision
+  const paneCount = useMemo(
+    () => (document ? countPanes(document) : null),
+    [document, revision]
+  )
 
   const add = (entry: (typeof CREATABLE)[number]): void => {
     if (!tab?.document.rootPane) return
@@ -173,7 +184,7 @@ function PaneActions(): ReactNode {
         Delete
       </button>
       <span className="ml-auto text-[11px] text-muted-foreground/60">
-        {tab ? `${countPanes(tab.document)} panes` : ''}
+        {paneCount === null ? '' : `${paneCount} panes`}
       </span>
     </div>
   )

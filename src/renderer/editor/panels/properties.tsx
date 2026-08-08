@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 
 import type {
   LayoutDocument,
@@ -289,7 +289,11 @@ function MaterialSection({
     )
   }
 
-  const users = countMaterialUsers(document, active!.index)
+  // Another full tree walk; see MaterialsPanel for why this is memoised.
+  const users = useMemo(
+    () => countMaterialUsers(document, active!.index),
+    [document, active]
+  )
 
   return (
     <Group title={`Material · ${material.name || '(unnamed)'}`}>
