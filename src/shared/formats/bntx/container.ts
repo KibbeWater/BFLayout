@@ -72,12 +72,40 @@ export interface BntxTexture {
   readonly channelSources: readonly [number, number, number, number]
   /** Byte offset of each mip level within imageData; entry 0 is always 0. */
   readonly mipOffsets: readonly number[]
+  /**
+   * Where `imageData` starts in the file.
+   *
+   * Kept so a surface can be written back *in place*: the pixel bytes are the only
+   * thing that changes, every offset in the container stays where it was, and the
+   * relocation table the runtime uses to fix up pointers is untouched. Rebuilding
+   * the container instead would mean reproducing that table, which is not
+   * something to attempt without a real dump to check against.
+   */
+  readonly dataOffset: number
+  /**
+   * Where this texture's name sat in the string pool it was read from.
+   *
+   * Kept only so a container can be rewritten with its strings in the original
+   * order, which is what makes an untouched rewrite byte-exact. Meaningless for a
+   * texture that came from anywhere but a parsed file, and ignored on write when
+   * a container mixes sources.
+   */
+  readonly nameOffset: number
   /** Tiled pixel data for every mip level and array layer. */
   readonly imageData: Uint8Array
 }
 
 export interface BntxContainer {
   readonly name: string
+  /**
+   * Where the container's own name sat in the string pool, as the entry's length
+   * prefix rather than its characters.
+   *
+   * Alongside each texture's `nameOffset`, this is what lets a rewrite put the
+   * pool back in its original order. The container name is *not* reliably first:
+   * plenty of shipped files interleave it among the texture names.
+   */
+  readonly nameOffset: number
   readonly littleEndian: boolean
   readonly version: { readonly major: number; readonly minor: number; readonly micro: number }
   /** Platform tag from the NX header: "NX  ", "Ounc" or "PC  ". */
@@ -196,6 +224,7 @@ export function parseBntx(data: Uint8Array): BntxContainer {
 
   return {
     name,
+    nameOffset: containerNameOffset - 2,
     littleEndian: reader.littleEndian,
     version: { major: versionMajor, minor: versionMinor, micro: versionMicro },
     target,
@@ -271,6 +300,7 @@ function parseTextureInfo(reader: BinaryReader, offset: number, index: number): 
   // Mip pointers are absolute file offsets into the BRTD blob. The first one is
   // where this texture's data starts; the rest become relative offsets.
   let imageData: Uint8Array = new Uint8Array(0)
+  let dataOffset = 0
   const mipOffsets: number[] = [0]
   if (mipPointerArray !== 0) {
     const absolute = reader.at(mipPointerArray, () => {
@@ -288,6 +318,7 @@ function parseTextureInfo(reader: BinaryReader, offset: number, index: number): 
       })
     }
     imageData = reader.bytesAt(base, imageSize)
+    dataOffset = base
     for (let level = 1; level < levels; level++) mipOffsets.push(absolute[level]! - base)
   }
 
@@ -313,6 +344,8 @@ function parseTextureInfo(reader: BinaryReader, offset: number, index: number): 
     gpuAccessFlags,
     channelSources,
     mipOffsets,
+    dataOffset,
+    nameOffset,
     imageData
   }
 }

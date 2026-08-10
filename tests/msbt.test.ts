@@ -114,8 +114,11 @@ describe('msbt parsing', () => {
     const document = parseMsbt(bytes)
     expect(document.encoding).toBe('utf-16')
     expect(document.messages).toHaveLength(2)
-    expect(document.messages[0]).toEqual({ label: '', index: 0, text: 'first' })
-    expect(document.messages[1]).toEqual({ label: 'Greeting', index: 1, text: 'second' })
+    // toMatchObject rather than toEqual: messages also carry the lossless `runs`
+    // the writer needs, and pinning the whole object here would make every future
+    // field a test failure rather than a decision.
+    expect(document.messages[0]).toMatchObject({ label: '', index: 0, text: 'first' })
+    expect(document.messages[1]).toMatchObject({ label: 'Greeting', index: 1, text: 'second' })
   })
 
   it('skips sections it does not model rather than failing on them', () => {
@@ -133,7 +136,7 @@ describe('msbt parsing', () => {
       )
     )
     expect(document.sections).toEqual(['ATO1', 'LBL1', 'WXYZ', 'TXT2'])
-    expect(document.messages[0]).toEqual({ label: 'Only', index: 0, text: 'kept' })
+    expect(document.messages[0]).toMatchObject({ label: 'Only', index: 0, text: 'kept' })
   })
 
   it('renders control sequences as placeholders instead of characters', () => {

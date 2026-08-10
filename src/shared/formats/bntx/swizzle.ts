@@ -155,6 +155,60 @@ export function mipBlockHeightLog2(
 }
 
 /**
+ * Tiles a plain row-major surface back into the GPU's block-linear layout.
+ *
+ * The exact inverse of `deswizzle`, sharing its address math so the two cannot
+ * drift apart — which matters more than it sounds: a forward swizzle that
+ * disagrees with the reverse one produces a texture that looks right in this app
+ * (it round-trips through our own code) and is shredded on the GPU.
+ *
+ * Padding introduced by rounding the surface up to whole blocks is left zeroed.
+ * The hardware never reads it, and matching whatever the original file happened to
+ * have there is not possible from the pixels alone.
+ */
+export function swizzle(
+  width: number,
+  height: number,
+  blkWidth: number,
+  blkHeight: number,
+  bpp: number,
+  tileMode: number,
+  blockHeightLog2: number,
+  linearData: Uint8Array
+): Uint8Array {
+  const w = divRoundUp(width, blkWidth)
+  const h = divRoundUp(height, blkHeight)
+  const linear = tileMode === BntxTileMode.Linear
+  const blockHeight = 1 << clampBlockHeightLog2(blockHeightLog2)
+
+  const pitch = linear
+    ? roundUp(w * bpp, LINEAR_PITCH_ALIGNMENT)
+    : roundUp(w * bpp, GOB_WIDTH_IN_BYTES)
+  const surfaceSize = linear
+    ? pitch * h
+    : pitch * roundUp(h, blockHeight * GOB_HEIGHT_IN_ROWS)
+  const widthInGobs = divRoundUp(w * bpp, GOB_WIDTH_IN_BYTES)
+
+  const out = new Uint8Array(surfaceSize)
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const source = (y * w + x) * bpp
+      if (source + bpp > linearData.length) continue
+
+      const destination = linear
+        ? y * pitch + x * bpp
+        : blockLinearAddress(x, y, widthInGobs, bpp, blockHeight)
+      if (destination + bpp > surfaceSize) continue
+
+      for (let i = 0; i < bpp; i++) out[destination + i] = linearData[source + i]!
+    }
+  }
+
+  return out
+}
+
+/**
  * Untiles one mip level into a plain row-major surface of
  * `divRoundUp(width, blkWidth) * divRoundUp(height, blkHeight) * bpp` bytes.
  *

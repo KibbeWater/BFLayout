@@ -50,6 +50,47 @@ export function sarcHash(name: string, key: number = DEFAULT_HASH_KEY): number {
   return hash
 }
 
+/**
+ * GPU resources the driver maps rather than reads.
+ *
+ * A shader or texture container that does not start on a page boundary is not a
+ * file the reader rejects — it is a null dereference somewhere inside it, with
+ * nothing connecting the crash to how the archive was packed. Every stock archive
+ * puts these on 0x1000, and so must anything this writes.
+ */
+const PAGE_ALIGNED = new Set(['.bntx', '.bnsh'])
+
+/** Bytes an entry of this name must start on when the archive is rebuilt. */
+export const GPU_ALIGNMENT = 0x1000
+
+/**
+ * The alignment a *new* entry should be given, from its name.
+ *
+ * Existing entries carry an alignment inferred from where they already sat, which
+ * preserves a stock archive exactly. A new one has no such history, and guessing
+ * from whichever sibling happens to share its extension gets it wrong precisely
+ * when it matters: the first `.bntx` added to an archive that has none.
+ */
+export function sarcAlignmentFor(name: string): number {
+  const lower = name.toLowerCase()
+  for (const extension of PAGE_ALIGNED) {
+    if (lower.endsWith(extension)) return GPU_ALIGNMENT
+  }
+  return DEFAULT_ENTRY_ALIGNMENT
+}
+
+/** True when this entry has to start on a page boundary. */
+export function needsPageAlignment(name: string): boolean {
+  const lower = name.toLowerCase()
+  return [...PAGE_ALIGNED].some((extension) => lower.endsWith(extension))
+}
+
+/**
+ * What everything else gets. Stock archives leave non-GPU entries wherever they
+ * fall, so this only has to be a sane floor rather than a reproduction.
+ */
+const DEFAULT_ENTRY_ALIGNMENT = 0x80
+
 function detectAlignment(absoluteOffset: number): number {
   if (absoluteOffset === 0) return MAX_ALIGNMENT
   let alignment = 1

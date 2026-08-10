@@ -32,11 +32,17 @@ export {
   divRoundUp,
   mipBlockHeightLog2,
   roundUp,
+  swizzle,
   swizzledSurfaceSize
 } from './swizzle'
 
 export type { DecodedImage } from './decode'
 export { applyChannelSources, decodeSurface, decodeTexture, isFormatSupported } from './decode'
+
+export { canEncodeFormat, encodeSurface, halveRgba, whyNotEncodable } from './encode'
+
+export { buildDict, differingBit, keyBit, lookupDict, type DictNode } from './dict'
+export { mergeBntx, writeBntx } from './write'
 
 export { decodeBc7Block } from './bc7'
 

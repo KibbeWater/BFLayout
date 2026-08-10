@@ -25,3 +25,4 @@ export {
   windowKind,
   windowPieces
 } from './window'
+export { localSegment, PANE_REFERENCE_KEYS, referencedPanes } from './userdata'
