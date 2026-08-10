@@ -20,7 +20,23 @@ import {
   previewSchema,
   snapshotSummarySchema,
   bymlDocumentSchema,
+  deployResultSchema,
+  deployTargetSchema,
   folderListingSchema,
+  gameLinkStatusSchema,
+  mcpActivitySchema,
+  mcpStatusSchema,
+  indexHitSchema,
+  messageReplaceResultSchema,
+  messageTableSchema,
+  indexProgressSchema,
+  modCheckReportSchema,
+  modDiffReportSchema,
+  modPackageInfoSchema,
+  modPackageResultSchema,
+  modLayerStatusSchema,
+  modProjectInputSchema,
+  modProjectSchema,
   textureListSchema,
   windowStateSchema,
   workspaceSnapshotSchema
@@ -71,6 +87,16 @@ const base = oc.errors({
   DB_ERROR: {
     message: 'Local database error',
     data: z.object({ detail: z.string() })
+  },
+  /**
+   * A write refused because its destination is mounted read-only — the pristine
+   * dump of an open mod project, in practice. Separate from IO_ERROR because
+   * nothing is broken and retrying cannot help: the message says where the edit
+   * belongs instead.
+   */
+  READ_ONLY: {
+    message: 'That location is read-only',
+    data: z.object({ path: z.string(), detail: z.string() })
   }
 })
 
@@ -153,7 +179,13 @@ export const dialogContract = {
   confirmDiscard: base
     .input(z.object({ name: z.string(), scope: z.enum(['tab', 'window']) }))
     .output(z.object({ choice: z.enum(['save', 'discard', 'cancel']) })),
+  /**
+   * `title` matters when more than one folder is chosen in a row — a project setup
+   * asks for a dump and then a mod folder, and two identical dialogs is how the
+   * second answer ends up in the first field.
+   */
   openFolder: base
+    .input(z.object({ title: z.string().optional(), buttonLabel: z.string().optional() }))
     .output(z.object({ canceled: z.boolean(), path: z.string().nullable() })),
   openFiles: base
     .input(z.object({ purpose: openPurposeSchema, multiple: z.boolean().optional() }))
@@ -171,9 +203,18 @@ export const archiveContract = {
   recoverNames: base
     .input(z.object({ archiveId: z.string(), candidates: z.array(z.string()) }))
     .output(archiveDescriptorSchema),
-  save: base
-    .input(z.object({ archiveId: z.string(), path: z.string().optional() }))
-    .output(archiveDescriptorSchema),
+  save: base.input(z.object({ archiveId: z.string(), path: z.string().optional() })).output(
+    z.object({
+      archive: archiveDescriptorSchema,
+      /**
+       * True when a mod project moved this write out of the pristine dump and into
+       * the mod layer. The descriptor's `path` already says where it landed; this
+       * says the app chose that, so the UI can explain itself the first time rather
+       * than appearing to save somewhere at random.
+       */
+      redirected: z.boolean()
+    })
+  ),
   /**
    * Writes one entry's bytes to a file.
    *
@@ -193,9 +234,10 @@ export const archiveContract = {
   /**
    * Replaces one entry's bytes from a file.
    *
-   * Also the pragmatic answer to importing a texture. Doing that properly needs a BNTX writer,
-   * a BCn/ASTC *compressor* and a forward Tegra swizzle, none of which exist here; swapping in
-   * a `.bntx` built elsewhere needs none of them.
+   * Still the answer for a texture whose format has no encoder here. `textures.importPng` now
+   * writes pixels straight into a container — but only in place, which means the size must be
+   * unchanged and the format uncompressed. For anything BCn or ASTC the missing piece is a
+   * *compressor*, and swapping in a `.bntx` built elsewhere needs none of them.
    *
    * The bytes go in uncompressed: Yaz0 or ZSTD is applied to the whole archive on save, not per
    * entry. An entry whose name could not be recovered cannot be replaced, and says so.
@@ -219,6 +261,44 @@ export const archiveContract = {
         detected: z.string()
       })
     ),
+  /**
+   * Adds a file to the archive, from a file on disk.
+   *
+   * Mods add files, and until now nothing here could — an archive could only ever
+   * hold the entries it shipped with. Refused in an archive with unrecovered
+   * names, like every other structural edit: writing a SARC needs all of them.
+   */
+  addEntry: base
+    .input(
+      z.object({
+        archiveId: z.string(),
+        name: z.string().min(1),
+        path: z.string().min(1)
+      })
+    )
+    .output(z.object({ archive: archiveDescriptorSchema, bytes: z.number().int() })),
+  deleteEntry: base
+    .input(z.object({ archiveId: z.string(), entryKey: z.string().min(1) }))
+    .output(archiveDescriptorSchema),
+  /** A rehash, not a relabel: SARC finds entries by the hash of their name. */
+  renameEntry: base
+    .input(
+      z.object({
+        archiveId: z.string(),
+        entryKey: z.string().min(1),
+        name: z.string().min(1)
+      })
+    )
+    .output(archiveDescriptorSchema),
+  duplicateEntry: base
+    .input(
+      z.object({
+        archiveId: z.string(),
+        entryKey: z.string().min(1),
+        name: z.string().min(1)
+      })
+    )
+    .output(archiveDescriptorSchema),
   close: base.input(z.object({ archiveId: z.string() })).output(okSchema)
 }
 
@@ -269,10 +349,239 @@ export const layoutContract = {
          * naming the old one meant crash recovery would restore the new edits into — and
          * then save over — the very file the user had moved away from.
          */
-        snapshotKey: z.string()
+        snapshotKey: z.string(),
+        /**
+         * True when a mod project moved this save out of the pristine dump and
+         * into the mod layer. The UI says so the first time, because a save that
+         * silently writes somewhere other than where the file was opened from is
+         * exactly the kind of helpfulness that reads as a bug.
+         */
+        redirected: z.boolean()
       })
     ),
   close: base.input(z.object({ documentId: z.string() })).output(okSchema)
+}
+
+/**
+ * Mod projects: a pristine dump, and the layer being built over it.
+ *
+ * Activating one changes what saving means process-wide — writes that would land
+ * in the dump are redirected into the layer, and the dump itself is refused — so
+ * this is deliberately a small, explicit surface rather than something inferred
+ * from which folder happens to be open.
+ */
+export const projectContract = {
+  list: base.output(z.array(modProjectSchema)),
+  active: base.output(modProjectSchema.nullable()),
+  create: base.input(modProjectInputSchema).output(modProjectSchema),
+  update: base
+    .input(z.object({ id: z.number().int(), patch: modProjectInputSchema.partial() }))
+    .output(modProjectSchema),
+  /** `null` deactivates, which unmounts the read-only dump. */
+  setActive: base
+    .input(z.object({ id: z.number().int().nullable() }))
+    .output(modProjectSchema.nullable()),
+  remove: base.input(z.object({ id: z.number().int() })).output(okSchema),
+  /** What the layer holds right now: every file, and whether it replaces or adds. */
+  status: base.output(modLayerStatusSchema),
+  /**
+   * Drops one file from the mod layer, so the dump's copy applies again.
+   *
+   * Deleting is the revert: a mod that ships a byte-identical file still shadows
+   * the original, and would go on shadowing it after a game update changed the
+   * real one. `hadPristine` is false when the file was an addition, which means
+   * the revert removed content rather than restoring anything.
+   */
+  revert: base
+    .input(z.object({ relativePath: z.string().min(1) }))
+    .output(z.object({ relativePath: z.string(), hadPristine: z.boolean() }))
+}
+
+/**
+ * Installing the mod layer where the emulator will find it.
+ *
+ * A copy, not a build: the layer is already the shape a romfs mod ships in. This
+ * deliberately stops at installing — starting the game is a separate decision.
+ */
+/**
+ * Checking every file the mod contains before it is deployed.
+ *
+ * Reports rather than refuses: a mod is entitled to ship a file this build cannot
+ * read, and the person who made it is better placed to judge than the checker is.
+ */
+export const modCheckContract = {
+  run: base.output(modCheckReportSchema)
+}
+
+/**
+ * Searching a dump by the names inside its files.
+ *
+ * Browsing cannot answer "which layout has a pane called BtnOk" or "where is this
+ * string", because the names live inside binary containers. Reading the dump once
+ * into sqlite makes both instant, which changes what the tool is for: most of
+ * modding a game this size is finding things, not editing them.
+ */
+export const indexContract = {
+  status: base.output(indexProgressSchema),
+  /** Starts a background build and returns immediately with the new status. */
+  build: base.input(z.object({ rootPath: z.string().min(1) })).output(indexProgressSchema),
+  search: base
+    .input(
+      z.object({
+        query: z.string(),
+        kinds: z.array(z.string()).optional(),
+        rootPath: z.string().optional(),
+        limit: z.number().int().min(1).max(1000).optional()
+      })
+    )
+    .output(z.array(indexHitSchema)),
+  /**
+   * Every file that names something — the reverse edge. Exact-name rather than a
+   * search, so a texture called `Btn` does not drag in `BtnLarge`.
+   */
+  references: base
+    .input(
+      z.object({
+        name: z.string().min(1),
+        kinds: z.array(z.string()).optional(),
+        rootPath: z.string().optional(),
+        limit: z.number().int().min(1).max(2000).optional()
+      })
+    )
+    .output(z.array(indexHitSchema)),
+  /** Distinct names of one kind — what feeds archive name recovery. */
+  names: base
+    .input(z.object({ kind: z.string().min(1), rootPath: z.string().optional() }))
+    .output(z.array(z.string())),
+  drop: base.input(z.object({ rootPath: z.string().min(1) })).output(okSchema)
+}
+
+/**
+ * A loopback listener the running game can report its current screen to.
+ *
+ * Off unless started, bound to 127.0.0.1, and it only ever *records* what it is
+ * told — the jump is offered, never taken. A tool that opens files because
+ * something on a socket asked it to is a tool with a remote-control problem.
+ */
+export const gameLinkContract = {
+  status: base.output(gameLinkStatusSchema),
+  start: base
+    .input(z.object({ port: z.number().int().min(1024).max(65535).default(47600) }))
+    .output(gameLinkStatusSchema),
+  stop: base.output(gameLinkStatusSchema),
+  /** Forgets the last report, so a stale banner can be dismissed. */
+  clear: base.output(gameLinkStatusSchema)
+}
+
+/**
+ * The game's text, readable and now writable.
+ *
+ * Message tables are the most-edited files in modding. Saving goes through the
+ * same copy-on-write path as everything else, so editing one out of a pristine
+ * dump produces a file in the mod layer and leaves the dump alone.
+ */
+export const messagesContract = {
+  open: base.input(z.object({ source: layoutSourceSchema })).output(messageTableSchema),
+  save: base
+    .input(
+      z.object({
+        source: layoutSourceSchema,
+        edits: z.array(z.object({ index: z.number().int(), text: z.string() }))
+      })
+    )
+    .output(
+      z.object({
+        bytes: z.number().int(),
+        changed: z.number().int(),
+        redirected: z.boolean(),
+        /** Null for an archive entry, whose bytes reach disk when the archive is saved. */
+        path: z.string().nullable()
+      })
+    ),
+  /**
+   * Find and replace across every message table under a folder.
+   *
+   * Run it with `dryRun` first. The result carries before/after examples because a
+   * pattern that matched more than intended across thousands of files is not
+   * something a count can tell you.
+   */
+  replaceAll: base
+    .input(
+      z.object({
+        root: z.string().min(1),
+        find: z.string().min(1),
+        replacement: z.string(),
+        regex: z.boolean().default(false),
+        dryRun: z.boolean().default(true)
+      })
+    )
+    .output(messageReplaceResultSchema)
+}
+
+/**
+ * What the mod changes, expressed structurally rather than in bytes.
+ *
+ * Doubles as the release changelog: it is the only view that says a button moved
+ * rather than that a file differs.
+ */
+export const modDiffContract = {
+  run: base.output(modDiffReportSchema)
+}
+
+/**
+ * Mods as something other people can install.
+ *
+ * The zip is the standard `contents/<title id>/romfs/…` shape, so it is the mod
+ * rather than a BFLayout format — someone who has never heard of this editor can
+ * drop it into their emulator's mods folder. The manifest rides alongside and
+ * records the game build it was made for.
+ */
+export const packageContract = {
+  export: base
+    .input(
+      z.object({
+        path: z.string().min(1),
+        version: z.string().default('1.0.0'),
+        author: z.string().default('')
+      })
+    )
+    .output(modPackageResultSchema),
+  /** Reads a package without installing it, so a mismatch is caught first. */
+  inspect: base.input(z.object({ path: z.string().min(1) })).output(modPackageInfoSchema),
+  import: base
+    .input(z.object({ path: z.string().min(1), overwrite: z.boolean().default(false) }))
+    .output(z.object({ imported: z.array(z.string()), skipped: z.array(z.string()) }))
+}
+
+/**
+ * The MCP server the app hosts.
+ *
+ * Distinct from the stdio one Claude Code launches: this one can see what is open,
+ * so a tool call that names no file means the layout on screen — and every call it
+ * serves is recorded and shown, because an agent writing your files should be
+ * something you watch.
+ */
+export const mcpContract = {
+  status: base.output(mcpStatusSchema),
+  start: base
+    .input(z.object({ port: z.number().int().min(1024).max(65535).default(47601) }))
+    .output(mcpStatusSchema),
+  stop: base.output(mcpStatusSchema),
+  /** Most recent calls, newest first. */
+  activity: base
+    .input(z.object({ limit: z.number().int().min(1).max(200).default(50) }))
+    .output(z.array(mcpActivitySchema)),
+  clear: base.output(okSchema),
+  /** Told once the renderer has reloaded whatever an agent wrote underneath it. */
+  acknowledgeEdits: base.output(okSchema)
+}
+
+export const deployContract = {
+  /** Emulator data directories, present or not, so the UI can say where it looked. */
+  targets: base.output(z.array(deployTargetSchema)),
+  run: base
+    .input(z.object({ dataDir: z.string().optional(), modName: z.string().optional() }))
+    .output(deployResultSchema)
 }
 
 /**
@@ -318,9 +627,9 @@ export const texturesContract = {
   /**
    * Writes a decoded texture to a PNG.
    *
-   * Textures are otherwise read-only, and this is the way one gets *out*: the archives
-   * ship BNTX with Tegra swizzling and BCn or ASTC compression, which no image editor
-   * opens.
+   * The way a texture gets *out*: the archives ship BNTX with Tegra swizzling and BCn or
+   * ASTC compression, which no image editor opens. `importPng` is the way back in, for
+   * the formats there is an encoder for.
    */
   exportPng: base
     .input(
@@ -337,6 +646,34 @@ export const texturesContract = {
         width: z.number().int(),
         height: z.number().int(),
         bytes: z.number().int()
+      })
+    ),
+  /**
+   * Replaces one texture's pixels from an image, in place.
+   *
+   * In place is the design, not a limitation of convenience: the container's
+   * offsets and the relocation table `nn::gfx` uses at load are left untouched, so
+   * a rewritten file cannot be structurally wrong. The cost is two refusals —
+   * dimensions must match, and the format must be one there is an encoder for,
+   * which means uncompressed. Both come back naming what to do instead.
+   */
+  importPng: base
+    .input(
+      z.object({
+        source: layoutSourceSchema,
+        name: z.string().min(1),
+        path: z.string().min(1)
+      })
+    )
+    .output(
+      z.object({
+        container: z.string(),
+        width: z.number().int(),
+        height: z.number().int(),
+        mipsWritten: z.number().int(),
+        /** Null for a texture inside an archive, whose bytes land when it is saved. */
+        path: z.string().nullable(),
+        redirected: z.boolean()
       })
     )
 }
@@ -402,7 +739,16 @@ export const contract = {
   animation: animationContract,
   folder: folderContract,
   byml: bymlContract,
-  snapshot: snapshotContract
+  snapshot: snapshotContract,
+  project: projectContract,
+  deploy: deployContract,
+  modCheck: modCheckContract,
+  index: indexContract,
+  gameLink: gameLinkContract,
+  mcp: mcpContract,
+  messages: messagesContract,
+  modDiff: modDiffContract,
+  package: packageContract
 }
 
 export type Contract = typeof contract

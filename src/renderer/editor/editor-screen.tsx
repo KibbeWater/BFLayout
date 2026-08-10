@@ -38,6 +38,9 @@ import { PropertiesPanel } from './panels/properties'
 import { BymlViewer } from './panels/byml-viewer'
 import { PreviewPanel } from './panels/preview'
 import { FolderBrowser } from './panels/folder-browser'
+import { AgentPanel } from './panels/agent-panel'
+import { ModPanel } from './panels/mod-panel'
+import { SearchPanel } from './panels/search-panel'
 import { MaterialsPanel } from './panels/materials'
 import { TexturePanel } from './panels/textures'
 import { TimelinePanel } from './panels/timeline'
@@ -329,13 +332,29 @@ function BrowserPane(): ReactNode {
 
   return (
     <>
-      <div className="flex shrink-0 items-stretch border-b">
-        {(['files', 'archive', 'textures', 'materials'] as const).map((name) => (
+      {/*
+        Scrollable, because the row grew past the sidebar.
+        
+        Six tabs at the default 288px do not fit, and a plain flex row does not say
+        so — it clips the last one against the edge, which is indistinguishable from
+        the tab not existing. `mod` was the one that disappeared, which is exactly
+        the tab someone goes looking for when they cannot find their mod.
+        
+        `shrink-0` on each button stops flex from squeezing them into illegibility
+        instead; the row scrolls, and the active tab is scrolled into view.
+      */}
+      <div className="flex shrink-0 items-stretch overflow-x-auto border-b [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {(
+          ['files', 'archive', 'search', 'textures', 'materials', 'mod', 'agent'] as const
+        ).map((name) => (
           <button
             key={name}
             type="button"
             onClick={() => setTab(name)}
-            className={`px-2.5 py-1.5 text-[11px] font-medium uppercase tracking-wide ${
+            ref={(node) => {
+              if (node && tab === name) node.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+            }}
+            className={`shrink-0 whitespace-nowrap px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide ${
               tab === name
                 ? 'border-b-2 border-primary text-foreground'
                 : 'text-muted-foreground hover:text-foreground'
@@ -350,8 +369,14 @@ function BrowserPane(): ReactNode {
           <FolderBrowser />
         ) : tab === 'archive' ? (
           <ArchiveBrowser />
+        ) : tab === 'search' ? (
+          <SearchPanel />
         ) : tab === 'textures' ? (
           <TexturePanel />
+        ) : tab === 'mod' ? (
+          <ModPanel />
+        ) : tab === 'agent' ? (
+          <AgentPanel />
         ) : (
           <MaterialsPanel />
         )}

@@ -7,6 +7,8 @@ import { useTheme } from '@renderer/lib/use-theme'
 import { useSave } from '@renderer/lib/use-save'
 import { useUnsavedGuard } from '@renderer/lib/use-unsaved-guard'
 import { ErrorBoundary } from './error-boundary'
+import { SettingsOverlay } from './settings-overlay'
+import { ShortcutsOverlay } from './shortcuts-overlay'
 
 export function AppShell({ children }: { children: ReactNode }): ReactNode {
   useGlobalCommands()
@@ -18,9 +20,12 @@ export function AppShell({ children }: { children: ReactNode }): ReactNode {
   useAutosave()
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden">
+    <div className="relative flex h-full w-full flex-col overflow-hidden">
       {/* Scoped so a crash inside one screen does not take the whole window. */}
       <ErrorBoundary>{children}</ErrorBoundary>
+      {/* In the shell, so ⌘/ answers on every route rather than only in the editor. */}
+      <ShortcutsOverlay />
+      <SettingsOverlay />
     </div>
   )
 }

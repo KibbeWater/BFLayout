@@ -8,6 +8,8 @@ import {
 } from '@shared/formats/compression'
 import { yaz0Compress, yaz0Decompress } from '@shared/formats/yaz0'
 import { IoError } from '@main/errors'
+import { zstd } from '@main/zstd'
+import { zstdLevel } from '@main/compression-level'
 
 /**
  * Compression sits in main rather than shared because ZSTD is a WASM module
@@ -20,25 +22,19 @@ export class CompressionService extends Effect.Service<CompressionService>()(
   'CompressionService',
   {
     effect: Effect.gen(function* () {
-      let zstd: typeof import('@bokuweb/zstd-wasm') | undefined
-
-      const loadZstd = Effect.gen(function* () {
-        if (zstd) return zstd
-        const mod = yield* Effect.tryPromise({
-          try: async () => {
-            const loaded = await import('@bokuweb/zstd-wasm')
-            await loaded.init()
-            return loaded
-          },
-          catch: (cause) =>
-            new IoError({
-              detail: `could not initialise the ZSTD decoder: ${
-                cause instanceof Error ? cause.message : String(cause)
-              }`
-            })
-        })
-        zstd = mod
-        return mod
+      /*
+       * Through the shared loader rather than a private one. Two initialisers in
+       * one process each instantiate the WASM module, and the second replaces the
+       * first's memory — see `main/zstd.ts`.
+       */
+      const loadZstd = Effect.tryPromise({
+        try: () => zstd(),
+        catch: (cause) =>
+          new IoError({
+            detail: `could not initialise the ZSTD decoder: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }`
+          })
       })
 
       const decompress = (
@@ -110,7 +106,7 @@ export class CompressionService extends Effect.Service<CompressionService>()(
           if (kind === 'zstd') {
             const mod = yield* loadZstd
             return yield* Effect.try({
-              try: () => new Uint8Array(mod.compress(data, 17)),
+              try: () => new Uint8Array(mod.compress(data, zstdLevel())),
               catch: (cause) =>
                 new IoError({
                   detail: `ZSTD compression failed: ${

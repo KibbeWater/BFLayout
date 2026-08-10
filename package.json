@@ -33,7 +33,9 @@
     "fixture:font": "tsx --tsconfig tsconfig.node.json scripts/fixture-font.ts",
     "diag:prt1": "tsx --tsconfig tsconfig.node.json scripts/diag-prt1.ts",
     "diag:pai1": "tsx --tsconfig tsconfig.node.json scripts/diag-pai1.ts",
-    "diag:bflan": "tsx --tsconfig tsconfig.node.json scripts/diag-bflan.ts"
+    "diag:bflan": "tsx --tsconfig tsconfig.node.json scripts/diag-bflan.ts",
+    "cli": "tsx --tsconfig tsconfig.node.json src/cli/main.ts",
+    "mcp": "tsx --tsconfig tsconfig.node.json src/mcp/server.ts"
   },
   "dependencies": {
     "@bokuweb/zstd-wasm": "0.0.27",

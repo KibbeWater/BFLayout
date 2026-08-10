@@ -28,6 +28,18 @@ export class NotFoundError extends Data.TaggedError('NotFoundError')<{
 }> {}
 
 /**
+ * A write that was refused because its destination is mounted read-only.
+ *
+ * In practice: the pristine romfs dump of an open mod project. Distinct from
+ * `IoError` on purpose — the filesystem is fine and retrying will not help, so
+ * the message has to say what to do instead rather than report a failure.
+ */
+export class ReadOnlyError extends Data.TaggedError('ReadOnlyError')<{
+  readonly path: string
+  readonly detail: string
+}> {}
+
+/**
  * The complete set of expected failures crossing the RPC boundary. Adding a
  * member here forces a new branch in toORPCError's exhaustive match.
  */
@@ -36,6 +48,7 @@ export type AppError =
   | IoError
   | FileNotFoundError
   | NotFoundError
+  | ReadOnlyError
   | BinaryReadError
   | FormatParseError
   | FormatWriteError

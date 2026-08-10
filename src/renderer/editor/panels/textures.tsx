@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, Ban, Download, Loader2 } from 'lucide-react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { AlertTriangle, Ban, Download, Loader2, Upload } from 'lucide-react'
 
 import type { LayoutSource, TextureInfo } from '@shared/contract'
 import { getClient, getOrpc } from '@renderer/lib/orpc'
@@ -104,6 +104,9 @@ function TextureRow({
   source: LayoutSource
 }): ReactNode {
   const [exporting, setExporting] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const orpc = getOrpc()
+  const queryClient = useQueryClient()
 
   /**
    * Writes the decoded texture out as a PNG.
@@ -140,6 +143,48 @@ function TextureRow({
     })()
   }
 
+  /**
+   * Replaces this texture's pixels from an image on disk.
+   *
+   * Written in place, so the container's structure is untouched: the image has to
+   * be the same size, and the texture has to be in a format there is an encoder
+   * for — uncompressed, in practice. Main refuses with the reason and the
+   * alternative when either is not true, which is more useful than hiding the
+   * button on formats someone might reasonably expect to work.
+   */
+  const importPng = (): void => {
+    setImporting(true)
+    void (async () => {
+      const client = getClient()
+      try {
+        const chosen = await client.dialog.openFiles({ purpose: 'image' })
+        if (chosen.canceled || chosen.paths.length === 0) return
+
+        const result = await client.textures.importPng({
+          source,
+          name: texture.name,
+          path: chosen.paths[0]!
+        })
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: orpc.textures.list.key() }),
+          queryClient.invalidateQueries({ queryKey: orpc.textures.get.key() }),
+          queryClient.invalidateQueries({ queryKey: orpc.archive.get.key() }),
+          queryClient.invalidateQueries({ queryKey: orpc.project.status.key() })
+        ])
+        reportSuccess(
+          result.redirected ? 'Imported into the mod' : 'Imported',
+          result.path === null
+            ? `${texture.name} replaced in ${result.container} (${result.mipsWritten} mip level${result.mipsWritten === 1 ? '' : 's'}). Save the archive to write it to disk.`
+            : `${texture.name} replaced in ${result.container} (${result.mipsWritten} mip level${result.mipsWritten === 1 ? '' : 's'}), written to ${result.path}.`
+        )
+      } catch (cause) {
+        reportError(cause, { retry: importPng })
+      } finally {
+        setImporting(false)
+      }
+    })()
+  }
+
   return (
     <li className="group flex items-start gap-2 rounded p-1.5 hover:bg-accent/40">
       <Thumbnail texture={texture} source={source} />
@@ -161,6 +206,21 @@ function TextureRow({
           {texture.decodable ? '' : ' · no decoder'}
         </p>
       </div>
+
+      <button
+        type="button"
+        onClick={importPng}
+        disabled={importing}
+        title={`Replace ${texture.name} from an image (same size; uncompressed formats only)`}
+        aria-label={`Replace ${texture.name} from an image`}
+        className="shrink-0 rounded p-1 opacity-0 hover:bg-accent focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-40"
+      >
+        {importing ? (
+          <Loader2 className="size-3.5 animate-spin" />
+        ) : (
+          <Upload className="size-3.5 text-muted-foreground" />
+        )}
+      </button>
 
       {texture.decodable ? (
         <button

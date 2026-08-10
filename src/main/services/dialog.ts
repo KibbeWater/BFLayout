@@ -68,16 +68,26 @@ export class DialogService extends Effect.Service<DialogService>()('DialogServic
      * Picks a directory — a dumped romfs, typically. No filters: the point is to
      * browse whatever is in there, including formats this build does not know.
      */
-    const openFolder = Effect.tryPromise({
+    /**
+     * Picks a folder.
+     *
+     * `title` and `buttonLabel` are worth passing whenever more than one folder is
+     * being chosen in a row: a project setup asks for a dump and then a mod folder,
+     * and two identical dialogs in a row is how someone puts the second answer in
+     * the first field.
+     */
+    const openFolder = (options?: { title?: string; buttonLabel?: string }) =>
+      Effect.tryPromise({
       try: async () => {
         const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
-        const options = {
-          properties: ['openDirectory' as const],
-          title: 'Open a folder'
+        const dialogOptions = {
+          properties: ['openDirectory' as const, 'createDirectory' as const],
+          title: options?.title ?? 'Open a folder',
+          ...(options?.buttonLabel ? { buttonLabel: options.buttonLabel } : {})
         }
         const result = parent
-          ? await dialog.showOpenDialog(parent, options)
-          : await dialog.showOpenDialog(options)
+          ? await dialog.showOpenDialog(parent, dialogOptions)
+          : await dialog.showOpenDialog(dialogOptions)
         return { canceled: result.canceled, path: result.filePaths[0] ?? null }
       },
       catch: (cause) =>
@@ -86,7 +96,7 @@ export class DialogService extends Effect.Service<DialogService>()('DialogServic
             cause instanceof Error ? cause.message : String(cause)
           }`
         })
-    })
+      })
 
     const saveFileAs = (options: { defaultName?: string; purpose: OpenPurpose }) =>
       Effect.tryPromise({

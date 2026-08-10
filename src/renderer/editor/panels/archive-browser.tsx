@@ -98,9 +98,14 @@ export function ArchiveBrowser(): ReactNode {
     setSaving(true)
     void (async () => {
       try {
-        const saved = await getClient().archive.save({ archiveId })
+        const { archive: saved, redirected } = await getClient().archive.save({ archiveId })
         await queryClient.invalidateQueries({ queryKey: orpc.archive.get.key() })
-        reportSuccess('Saved', `${saved.displayName} written to disk.`)
+        reportSuccess(
+          redirected ? 'Saved into the mod' : 'Saved',
+          redirected
+            ? `${saved.displayName} copied into your mod folder at ${saved.path}. The dump is untouched.`
+            : `${saved.displayName} written to disk.`
+        )
       } catch (cause) {
         reportError(cause, { retry: saveArchive })
       } finally {
@@ -158,11 +163,184 @@ export function ArchiveBrowser(): ReactNode {
   }
 
   /**
+   * Adds a file to the archive.
+   *
+   * The name is asked for rather than taken from the file, because where an entry
+   * sits inside the archive is part of its identity: `blyt/Foo.bflyt` and
+   * `Foo.bflyt` are different files to the game, and only one of them will be
+   * found. The picked file's name is offered as the default under the folder the
+   * user was looking at.
+   */
+  const addEntry = (folder: string): void => {
+    void (async () => {
+      const client = getClient()
+      try {
+        const chosen = await client.dialog.openFiles({ purpose: 'any' })
+        if (chosen.canceled || chosen.paths.length === 0) return
+        const picked = chosen.paths[0]!
+        const base = picked.split(/[/\\]/).pop() ?? 'file'
+
+        const name = window.prompt(
+          'Name for this entry inside the archive.\n\nThe path matters: the game looks the file up by exactly this name.',
+          folder ? `${folder}/${base}` : base
+        )
+        if (name === null || name.trim() === '') return
+
+        setBusyEntry(name)
+        const result = await client.archive.addEntry({
+          archiveId: archiveId!,
+          name: name.trim(),
+          path: picked
+        })
+        await queryClient.invalidateQueries({ queryKey: orpc.archive.get.key() })
+        reportSuccess(
+          'Added',
+          `${name.trim()} added to ${result.archive.displayName} (${result.bytes} bytes). Save the archive to write it to disk.`
+        )
+      } catch (cause) {
+        reportError(cause)
+      } finally {
+        setBusyEntry(null)
+      }
+    })()
+  }
+
+  const deleteEntry = (entry: ArchiveEntryInfo): void => {
+    if (
+      !window.confirm(
+        `Remove ${entry.displayName} from this archive?\n\nIt is gone once the archive is saved. Extract it first if you might want it back.`
+      )
+    ) {
+      return
+    }
+    setBusyEntry(entry.key)
+    void (async () => {
+      try {
+        await getClient().archive.deleteEntry({ archiveId: archiveId!, entryKey: entry.key })
+        await queryClient.invalidateQueries({ queryKey: orpc.archive.get.key() })
+        reportSuccess('Removed', `${entry.displayName} is no longer in this archive.`)
+      } catch (cause) {
+        reportError(cause, { retry: () => deleteEntry(entry) })
+      } finally {
+        setBusyEntry(null)
+      }
+    })()
+  }
+
+  const renameEntry = (entry: ArchiveEntryInfo): void => {
+    const name = window.prompt(
+      'New name for this entry.\n\nSARC finds files by the hash of their name, so this is a real rename — anything referring to the old name will stop finding it.',
+      entry.displayName
+    )
+    if (name === null || name.trim() === '' || name.trim() === entry.displayName) return
+
+    setBusyEntry(entry.key)
+    void (async () => {
+      try {
+        await getClient().archive.renameEntry({
+          archiveId: archiveId!,
+          entryKey: entry.key,
+          name: name.trim()
+        })
+        await queryClient.invalidateQueries({ queryKey: orpc.archive.get.key() })
+        reportSuccess('Renamed', `${entry.displayName} is now ${name.trim()}.`)
+      } catch (cause) {
+        reportError(cause, { retry: () => renameEntry(entry) })
+      } finally {
+        setBusyEntry(null)
+      }
+    })()
+  }
+
+  const duplicateEntry = (entry: ArchiveEntryInfo): void => {
+    const suggested = entry.displayName.replace(/(\.[^./]+)?$/, (extension) => `_copy${extension}`)
+    const name = window.prompt('Name for the copy.', suggested)
+    if (name === null || name.trim() === '') return
+
+    setBusyEntry(entry.key)
+    void (async () => {
+      try {
+        await getClient().archive.duplicateEntry({
+          archiveId: archiveId!,
+          entryKey: entry.key,
+          name: name.trim()
+        })
+        await queryClient.invalidateQueries({ queryKey: orpc.archive.get.key() })
+        reportSuccess('Duplicated', `${name.trim()} added alongside ${entry.displayName}.`)
+      } catch (cause) {
+        reportError(cause, { retry: () => duplicateEntry(entry) })
+      } finally {
+        setBusyEntry(null)
+      }
+    })()
+  }
+
+  /**
+   * Fills in missing entry names from the dump index.
+   *
+   * A hash-only archive can be read but not written, which makes it read-only in
+   * practice — and the names are not lost, only absent: they are written down in
+   * the layouts and archives *around* it, which is exactly what the index has
+   * already collected. Every texture, layout, animation and font name it knows is
+   * offered as a candidate and the ones whose hash matches stick.
+   */
+  const recoverNames = (): void => {
+    setBusyEntry('names')
+    void (async () => {
+      const client = getClient()
+      try {
+        const kinds = ['texture', 'part', 'animation', 'font'] as const
+        const collected = await Promise.all(
+          kinds.map((kind) => client.index.names({ kind }))
+        )
+        const candidates = [...new Set(collected.flat())]
+        // The names inside an archive carry folders; the index knows the bare names.
+        const withFolders = candidates.flatMap((name) => [
+          name,
+          `blyt/${name}`,
+          `timg/${name}`,
+          `anim/${name}`,
+          `font/${name}`
+        ])
+
+        if (withFolders.length === 0) {
+          reportError(
+            new Error(
+              'The dump has not been indexed yet, so there are no names to try. Index it from the Search tab first.'
+            )
+          )
+          return
+        }
+
+        const result = await client.archive.recoverNames({
+          archiveId: archiveId!,
+          candidates: withFolders
+        })
+        await queryClient.invalidateQueries({ queryKey: orpc.archive.get.key() })
+
+        const remaining = result.unnamedCount
+        reportSuccess(
+          remaining === 0 ? 'Every name recovered' : 'Some names recovered',
+          remaining === 0
+            ? `${result.displayName} can now be written back.`
+            : `${remaining} of ${result.entries.length} entries still have no name, so this archive still cannot be saved. The missing names are not referenced anywhere the index has seen.`
+        )
+      } catch (cause) {
+        reportError(cause, { retry: recoverNames })
+      } finally {
+        setBusyEntry(null)
+      }
+    })()
+  }
+
+  /**
    * Replaces an entry from a file the user picks.
    *
-   * Also the practical route to importing a texture: doing that properly needs a BNTX writer, a
-   * BCn/ASTC compressor and a forward Tegra swizzle, none of which exist here, while swapping in
-   * a `.bntx` built elsewhere needs none of them.
+   * Still the route for a texture whose format has no encoder here. The Textures
+   * panel can now write pixels straight into a container in place, but only where
+   * the format is uncompressed and the size is unchanged — for anything BCn or
+   * ASTC, swapping in a `.bntx` built elsewhere is the way, and it needs no
+   * compressor on this side.
    *
    * What arrived is reported rather than validated. Refusing bytes this build cannot parse would
    * block the legitimate case of a format it does not model; accepting them silently would let
@@ -321,11 +499,22 @@ export function ArchiveBrowser(): ReactNode {
           {data.dirty ? ' · unsaved changes' : ''}
         </p>
         {data.unnamedCount > 0 ? (
-          <p className="mt-1 rounded bg-muted px-1.5 py-1 text-[11px] text-muted-foreground">
-            {data.unnamedCount} of {data.entries.length} entries have no stored name. They are
-            listed by hash and can be extracted, but nothing in this archive can be replaced:
-            writing a SARC needs every name, so a change here could never be saved.
-          </p>
+          <div className="mt-1 rounded bg-muted px-1.5 py-1 text-[11px] text-muted-foreground">
+            <p>
+              {data.unnamedCount} of {data.entries.length} entries have no stored name. They are
+              listed by hash and can be extracted, but nothing in this archive can be replaced:
+              writing a SARC needs every name, so a change here could never be saved.
+            </p>
+            <button
+              type="button"
+              onClick={recoverNames}
+              disabled={busyEntry !== null}
+              className="mt-1 rounded border bg-background px-1.5 py-0.5 text-[10px] hover:bg-accent disabled:opacity-40"
+              title="Try every name the dump index knows against the missing hashes"
+            >
+              {busyEntry === 'names' ? 'Recovering…' : 'Recover names from the index'}
+            </button>
+          </div>
         ) : null}
       </div>
 
@@ -336,7 +525,20 @@ export function ArchiveBrowser(): ReactNode {
               <ChevronDown className="size-3" />
               <Folder className="size-3" />
               {folder || 'root'}
-              <span className="ml-auto normal-case tracking-normal opacity-60">
+              <button
+                type="button"
+                onClick={() => addEntry(folder)}
+                disabled={busyEntry !== null || data.unnamedCount > 0}
+                title={
+                  data.unnamedCount > 0
+                    ? 'This archive cannot be written back until its names are recovered'
+                    : `Add a file to ${folder || 'the archive root'}`
+                }
+                className="ml-auto rounded border px-1 py-0 text-[10px] normal-case tracking-normal hover:bg-accent disabled:opacity-30"
+              >
+                + add
+              </button>
+              <span className="normal-case tracking-normal opacity-60">
                 {entries.length}
               </span>
             </div>
@@ -425,6 +627,33 @@ export function ArchiveBrowser(): ReactNode {
                         className="rounded border bg-background px-1 py-0.5 text-[10px] hover:bg-accent disabled:opacity-40"
                       >
                         Replace
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => duplicateEntry(entry)}
+                        disabled={busyEntry !== null || data.unnamedCount > 0}
+                        title={`Add a copy of ${entry.displayName} under a new name`}
+                        className="rounded border bg-background px-1 py-0.5 text-[10px] hover:bg-accent disabled:opacity-40"
+                      >
+                        Copy
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => renameEntry(entry)}
+                        disabled={busyEntry !== null || !entry.named || data.unnamedCount > 0}
+                        title={`Rename ${entry.displayName}`}
+                        className="rounded border bg-background px-1 py-0.5 text-[10px] hover:bg-accent disabled:opacity-40"
+                      >
+                        Rename
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deleteEntry(entry)}
+                        disabled={busyEntry !== null || data.unnamedCount > 0}
+                        title={`Remove ${entry.displayName} from the archive`}
+                        className="rounded border bg-background px-1 py-0.5 text-[10px] text-destructive hover:bg-accent disabled:opacity-40"
+                      >
+                        Delete
                       </button>
                     </span>
                   </li>

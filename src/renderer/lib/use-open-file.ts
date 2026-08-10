@@ -200,7 +200,7 @@ export function useOpenFile(): {
     setBusy(true)
     void (async () => {
       try {
-        const result = await client.dialog.openFolder()
+        const result = await client.dialog.openFolder({ title: 'Open a game dump' })
         if (result.canceled || !result.path) return
         openFolder(result.path)
         await navigate({ to: '/editor' })

@@ -9,7 +9,8 @@ export default defineConfig({
       // `editor/commands` is pure document manipulation, and its undo behaviour is
       // worth covering without booting Electron.
       '@renderer': resolve(__dirname, 'src/renderer'),
-      '@main': resolve(__dirname, 'src/main')
+      '@main': resolve(__dirname, 'src/main'),
+      '@headless': resolve(__dirname, 'src/headless')
     }
   },
   test: {

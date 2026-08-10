@@ -19,11 +19,16 @@
     "paths": {
       "@shared/*": ["src/shared/*"],
       "@main/*": ["src/main/*"],
+      "@headless/*": ["src/headless/*"],
       "@renderer/*": ["src/renderer/*"]
     }
   },
   "include": [
     "src/main/**/*.ts",
+    // The headless CLI and MCP server: same codecs, no Electron.
+    "src/headless/**/*.ts",
+    "src/cli/**/*.ts",
+    "src/mcp/**/*.ts",
     "src/shared/**/*.ts",
     "tests/**/*.ts",
     // Renderer modules that are pure state/document manipulation with no DOM use, and

@@ -357,7 +357,7 @@ export function runSelfTest(win: BrowserWindow): void {
 
             // Saving the archive to a new path leaves the original alone.
             const copyPath = archivePath + '.copy.szs'
-            const copied = await c.archive.save({ archiveId: arch.archiveId, path: copyPath })
+            const { archive: copied } = await c.archive.save({ archiveId: arch.archiveId, path: copyPath })
             check(copied.path === copyPath && copied.dirty === false,
               'archive save-as wrote ' + copied.displayName + ' and cleared dirty')
 
@@ -1218,7 +1218,7 @@ async function checkEditorRenders(win: BrowserWindow, archivePath: string): Prom
     const identicalLeftClean = !after.dirty
 
     // Saving is reachable without a layout tab, which is what makes any of this recoverable.
-    const saved = await c.archive.save({ archiveId })
+    const { archive: saved } = await c.archive.save({ archiveId })
 
     return {
       name: entry.displayName,

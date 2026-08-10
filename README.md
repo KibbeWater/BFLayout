@@ -1,10 +1,14 @@
 # BFLayout
 
-A cross-platform layout editor for Nintendo Switch BFLYT files and the archives they ship in — an alternative to the Windows-only Switch Toolbox.
+A cross-platform layout editor **and modding workbench** for Nintendo Switch BFLYT files and the archives they ship in — an alternative to the Windows-only Switch Toolbox.
 
 ## Status
 
 Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT layout, inspect and edit the pane tree on a texture-mapped WebGL2 canvas, and save back into the archive with byte-level fidelity for everything you did not touch.
+
+It is also a tool for building a *mod* rather than editing files: point it at a
+pristine dump and a mod folder, and the dump becomes read-only while every save
+lands in the mod instead. See [Modding](#modding).
 
 | Area | State |
 | --- | --- |
@@ -17,6 +21,7 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | Other formats | Previewable read-only: fonts with glyph rendering, BNTX textures, BYML/`bgyml` trees, MSBT text, BFRES model structure, AAMP parameters, BWAV audio metadata, AINB logic |
 | Undo / redo | Working — every edit, including property, material and visibility |
 | Add / delete / duplicate pane, grid snapping | Working |
+| Pane groups: list, add, edit, delete | Working — what animations bind through |
 | Reorder and reparent panes (z-order) | Working — buttons and Alt+arrows |
 | Align and distribute a multi-pane selection | Working |
 | Filter the pane hierarchy by name or kind | Working |
@@ -27,6 +32,7 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | Session restore | Offers the previous session on launch |
 | Crash recovery | Snapshots unsaved documents; offers them back on launch |
 | BNTX textures | Decode and preview (BC1–BC5, BC7, all ASTC LDR block sizes, uncompressed; no BC6H) |
+| BNTX containers: write and merge | Working — all 470 shipped containers rewrite byte for byte |
 | BFLAN animation | Parse, play, scrub, inspect keyframes (no keyframe editing) |
 | Canvas resize handles, rubber-band select, alignment guides | Working |
 | Folder / romfs browsing | Working (tree or list, lazy per directory, windowed rows) |
@@ -34,7 +40,21 @@ Working today: open a `.szs`/`.sarc` archive, browse its contents, open a BFLYT 
 | Show / hide panels, native menu bar | Working |
 | prt1 external part resolution | Working (parts draw their referenced layout) |
 | Texture export to PNG | Working |
-| Texture add / replace | Not started (textures are otherwise read-only) |
+| Texture import from PNG | Working **in place** — same size, uncompressed formats only (no BCn/ASTC encoder) |
+| Archive entries: add, delete, rename, duplicate | Working |
+| Name recovery for hash-only archives | Working, fed by the dump index |
+| MSBT message tables | **Read and write**, with inline commands preserved; batch find/replace |
+| Mod projects: read-only dump, copy-on-write saves | Working |
+| Overlay browsing, per-file revert | Working |
+| Pre-deploy check, structural diff vs the dump | Working |
+| Deploy to Astris / Ryujinx mods folder | Working (install only — it never launches the game) |
+| Mod package export / import, with a game-version gate | Working |
+| Dump index: search names inside every file | Working (sqlite FTS5) |
+| Reverse references — who uses this texture, part, pane | Working |
+| Layouts as reviewable YAML, round-tripped | Working |
+| Headless CLI | Working (`pnpm cli`) |
+| MCP server for Claude Code | Working (`pnpm mcp`) — see [docs/mcp.md](docs/mcp.md) |
+| Game link: jump to the screen the game is showing | Working, needs a Colony plugin — see [docs/game-link.md](docs/game-link.md) |
 | BFFNT font rendering | Not needed for this title — it ships scalable fonts, which do decode (see Text panes) |
 
 **Validated against real game files.** Every layout archive in a Tomodachi Life
@@ -46,6 +66,7 @@ romfs dump (Switch, v1.0.4) is parsed and rewritten byte for byte:
 | BFLYT layouts | 544 | **100%** |
 | BFLAN animations | 2187 | **100%** |
 | BNTX containers | 74,571 textures decoded | 100% |
+| BNTX rewrite | 470 containers, 3106 textures | **100%** |
 
 Every file, byte for byte. See [Validating against real
 files](#validating-against-real-files) for how to run it, and for the two format
@@ -83,6 +104,11 @@ rather than a table of bindings.
 
 ### Keyboard
 
+The full list is in the app: **Help → Show All Shortcuts…**, or ⌘/ from anywhere.
+The Help menu also opens this file, the modding guide, the MCP and game-link docs,
+and reveals the application data folder — which is where the database, the dump
+index and the crash-recovery snapshots live, and which macOS otherwise hides.
+
 | Keys | What |
 | --- | --- |
 | Cmd/Ctrl + A | Select every pane |
@@ -98,6 +124,7 @@ rather than a table of bindings.
 | ⌘O / ⌘⇧O | Open a file / open a folder |
 | ⌘1–⌘4 | Toggle the sidebar, hierarchy, properties, timeline |
 | ⌘0 | Canvas only |
+| ⌘/ | Show every shortcut, on any screen |
 | ⌘F | Fit the layout to the view |
 | Alt while dragging | Suspend grid snapping and alignment guides |
 | Two-finger scroll | Pan; pinch or ⌘-scroll zooms at the cursor |
@@ -115,6 +142,242 @@ Select-behind exists because painter's order makes the topmost pane the only hit
 shipped layouts routinely end with a full-screen `bnd1` or `pan1` — which then
 swallows every click. Clicking the same spot repeatedly walks down the stack and
 wraps at the bottom.
+
+## Modding
+
+The editor opens a file, changes it, and writes it back. That is the wrong shape
+for a mod, and the difference is not cosmetic: a mod is a *layer* over a pristine
+dump, the emulator composes the two at load time, and the dump is the one copy of
+the game's files anyone has. Editing it in place is how a modding session ends with
+nothing to compare against and nothing to ship.
+
+### A project makes the dump read-only
+
+A project names two folders: the pristine romfs, and the folder the mod is being
+built in. While one is active:
+
+- the dump is **mounted read-only**, enforced at the single write funnel every save
+  passes through rather than by convention at each call site;
+- a save of a file that came out of the dump is **redirected** into the mod folder
+  at the same relative path, and the open tab retargets itself at the copy — so the
+  next save goes where the first one went, and a crash recovers into the mod rather
+  than proposing to write the game;
+- the file browser shows the **merged** tree, badged `mod` or `new`, and a
+  `modified` row opens the mod's copy because that is what the game would load.
+
+The redirect is invisible while it works, which is why the first save says so
+plainly rather than reporting a normal save to a path nobody chose.
+
+Reverting is deleting. A mod that ships a byte-identical file still shadows the
+original, and goes on shadowing it after a game update changes the real one — so
+the Mod panel calls that out as something to revert rather than leaving it looking
+harmless.
+
+### Opening one
+
+**Open** on the project card browses the *dump*, with the mod layered over it —
+badged `mod` and `new` where your files shadow or add to the game's. That is the
+right place to work from: a mod is edited in the context of what it modifies, and
+the alternative, browsing the mod folder alone, shows you only the files you have
+already changed.
+
+Creating a project, or picking one from the list, opens it for the same reason.
+The mod on its own — every file it contains, and nothing else — is the **Mod**
+tab in the sidebar, and its rows open the file they name.
+
+### Check, diff, deploy, package
+
+The **Mod** tab in the sidebar is the whole-mod view, because every other view in
+the app is per-file and a mod is a set:
+
+- **Check** reads every file the mod contains, decompresses it, identifies it by
+  magic and parses it — *and opens its archives*, which is where the interesting
+  problems live, since a layout mod is almost always a layout inside a `.szs`. It
+  reports rather than refuses: a mod is entitled to ship a format this build cannot
+  read, and the person who made it is better placed to judge than the checker is.
+- **Diff** compares each file with the dump's copy and describes what changed —
+  "3 panes moved, 1 material changed" — which is a review, a changelog, and the
+  answer to what you did yesterday. A byte diff of a `.szs` is worthless because
+  recompression moves everything.
+- **Deploy** copies the layer into `mods/contents/<title id>/<mod>/romfs`, finding
+  Astris and Ryujinx the same way Colony's `deploy.sh` does. It prunes files the
+  mod no longer contains, and says which: a reverted file left behind in the
+  deployed copy is still loaded by the game, which looks exactly like an edit that
+  did not take.
+- **Package** writes the standard `contents/<title id>/…` zip, so the result is the
+  mod rather than a BFLayout format. The manifest records the game version, and
+  importing someone else's package checks it **before** any bytes reach disk — a
+  layout mod for the wrong build does not fail cleanly, it loads and the game
+  misbehaves in ways nobody attributes to the mod.
+
+Deploy stops at installing. Starting the game is a separate decision, and a tool
+that launches an emulator because you pressed save is one people learn to be wary
+of.
+
+### A mod is usually more than assets
+
+Two things follow from that, and both are easy to get wrong quietly.
+
+**The mod's directory name has to be agreed, not derived.** A mod with a code half
+installs into the same place as its asset half — Colony ships a `subsdk9` into
+`contents/<title>/colony/exefs` and its romfs into `contents/<title>/colony/romfs`.
+A deploy that named the directory after the *project* would install a second,
+parallel mod that the loader's own deploy does not manage, and the two would drift
+apart with nothing to say so. So the project carries a **mod folder name**, and the
+form says what it is for.
+
+The romfs folder is also treated the way Colony's deploy treats it: it is the
+source of truth, mirrored with deletions, and `README.md` is not part of the mod —
+a romfs overlay is a mirror of the game's tree, so anything in it is a file the
+game gets handed.
+
+**The resource size table is the hazard nothing else catches.** These titles ship a
+table of how much memory each romfs resource needs, and the loader trusts it: make
+a file bigger than its entry allows and the game does not fail politely, it fails
+to load the resource or crashes, pointing nowhere near the file that grew. It is
+the most common way a mod that is *more* than swapping same-sized assets goes
+wrong.
+
+BFLayout does not model that table and does not pretend to. What **Check** does is
+notice the dangerous combination — a file whose expanded size differs from the
+dump's, with no resource size table shipped alongside it — and say so. Sizes are
+compared *decompressed*, because that is what the table records and because
+comparing compressed bytes would fire on almost every re-save.
+
+### Project settings
+
+A project carries its own settings, each with a default that is right for the
+common case — where it deploys and whether a deploy prunes, what counts as part of
+the mod, the ZSTD level, which checks apply, and which folders the index reads.
+Every one of them exists because a real project needed it to be different, and
+they are reachable on **⌘,** along with the editor's own settings, which were
+persisted and previously adjustable only by editing the database.
+
+The index scope is the one worth setting deliberately. Indexing defaults to the
+whole dump, which is correct and, for a romfs of 66,000 files across several
+gigabytes, slow — every file is decompressed and parsed. A project that only ever
+touches `Layout/` can name it and have the index take seconds.
+
+### Finding things
+
+Browsing a romfs answers "what files are there". Almost every question a modder
+actually has is the other one — *where is the thing called this* — and the names
+that matter live inside binary containers where neither a file browser nor `grep`
+can reach them.
+
+The **Search** tab indexes a dump once into sqlite: every pane name, material,
+texture, font, part reference, animation target, BYML key and message, with FTS5
+over the lot. Then it is instant, and the reverse direction — *what refers to
+this* — is a click from any result. That one is what tells you whether an edit is
+safe: a shared texture changed for one screen changes every screen that names it.
+
+It also feeds name recovery. A hash-only archive can be read but not written, which
+makes it read-only in practice — and the names are not lost, only absent: they are
+written down in the files *around* it, which is exactly what the index collected.
+
+### Layouts as text
+
+`layout_to_text` (and `pnpm cli text`) writes the whole document as YAML that reads
+back to the same bytes. A binary mod is a black box in version control — you can
+see *that* a `.szs` changed and nothing about what. This is the thing Switch
+Toolbox structurally cannot do, and it changes what a group of people can build
+together rather than merely making one person faster.
+
+Editor-only pane ids are left out, so exporting an unchanged layout twice produces
+an identical file and a diff is about the change.
+
+### Text
+
+MSBT is writable. The reason it took a codec change rather than a save button is
+that a message is not a string: it is text with inline commands threaded through
+it — colour changes, button glyphs, variable substitutions — each carrying an
+opaque payload. The editable form shows those as `{n:1.4}` placeholders, which are
+*movable*, because moving a substitution to a different point in a sentence is most
+of what translating is. Saving merges the edited string against the original's
+commands; a placeholder the message never had is refused rather than invented,
+since there would be no payload to write.
+
+Batch find-and-replace across every table under a folder is available over RPC and
+through the CLI and MCP server. Run it with `dryRun` first — it returns before and
+after examples, because a pattern that matched more than intended across 3,406
+files is not something a count can tell you.
+
+### Textures
+
+Importing a PNG writes the pixels **in place**: the container's offsets, its BRTI
+blocks and the relocation table `nn::gfx` uses to fix up pointers at load are all
+left exactly as they were. That is deliberate. Rebuilding a BNTX means reproducing
+that relocation table, and getting it subtly wrong produces a file this app reads
+back perfectly and the game refuses — the failure nobody would attribute to the
+tool, and not something to attempt without a real dump to check against.
+
+The cost is two refusals, both of which come back naming what to do instead: the
+image must match the original's dimensions, and the format must be one there is an
+encoder for. Compressing to BCn or ASTC well is a rate-distortion search rather
+than a format conversion, so there is no encoder for those, and the honest answer
+is to build the `.bntx` elsewhere and use Replace on the archive entry.
+
+The forward Tegra swizzle that makes this work is pinned to the reverse one that
+already decodes 74,571 real textures — `deswizzle(swizzle(x)) === x` for every
+shape. It is the only leverage available without a GPU, and it is a good one: a
+tiling function that disagrees with the hardware produces a texture that looks
+perfect in this app and is shredded on screen.
+
+### Working headless
+
+`pnpm cli` is the same engine without a window — `info`, `list`, `tree`, `render`,
+`set`, `text`, `apply`, `check`, `diff`, `search`. `check` exits non-zero, which is
+what makes it a CI gate. This is the dividend the `shared` purity gate was built
+for and which, until now, only the tests collected.
+
+`pnpm mcp` exposes the same engine to Claude Code over MCP — 44 tools covering
+archives (create, clone, add, rename and delete entries), layout structure (add,
+delete, duplicate, rename, reparent, reorder, materials, user data), animations
+(create, tracks, keyframes, length, looping) and a headless renderer that draws
+a layout to a PNG using the editor's own transform code, so a preview cannot
+disagree with the canvas about where a pane is. It decodes the **real textures**,
+draws nine-slice window frames, and follows part panes into the layouts they
+instantiate — on a real game screen that is the difference between three drawn
+panes and forty-eight. Text is not drawn, and blend modes are not applied, so it is
+a preview rather than a screenshot. `render_animation_frame` draws the layout **as
+an animation leaves it at a given frame**, which is the difference between reading
+curves and seeing them.
+
+It is **project-aware**: it reads the same database the app writes, takes the
+active mod project, and applies the same read-only dump and copy-on-write redirect
+— so an agent editing a file from the dump produces a copy in the mod folder, and a
+write into the dump is refused. Tool calls are served one at a time and writes are
+atomic, because two concurrent edits to one archive otherwise lose one of them.
+
+A whole screen can be authored without leaving it: `create_archive` makes the SARC
+(compression follows the extension), `create_layout` and `create_animation` fill it,
+and `clone_archive` copies a stock screen while renaming the layout and every sibling
+animation together — the game resolves animations by the layout's name, so renaming
+only the layout leaves a screen that loads and never animates, silently.
+
+Panes carry behaviour that is not in their fields: `usd1` user data wires panes to
+each other by name, and `AdjustToTextOn` makes a pane resize itself every frame to
+fit the text panes it names. Duplicating one is therefore a trap — the copy keeps
+pointing at the original's collaborator, and nothing about that is an error. So
+`duplicate_pane` repoints references at the copy's own panes and warns about the
+ones it cannot, `edit_pane_userdata` clears or repoints them, and `check` reports a
+reference naming a pane the layout does not have. That last rule runs clean across
+all 66,344 files of a shipped romfs, which took teaching it that references can name
+several panes, can path into a part pane, and can be rooted at the embedding layout.
+
+Entries are packed **by kind**: shaders and texture containers land on `0x1000`
+boundaries, everything else on the usual `0x80`. The driver maps GPU resources
+rather than reading them, so one that starts mid-page crashes inside the reader with
+nothing naming the archive that caused it. `check` reports a misaligned one as an
+error, which is the only cheap way to catch it.
+
+Both are built alongside the main process, so a packaged app can serve MCP without
+a source checkout or a Node installation. See [docs/mcp.md](docs/mcp.md).
+
+Both read and write Yaz0 and ZSTD, so a dump that ships entirely as `.zs` — which
+this game's does — is fully reachable from a script. An archive is re-compressed as
+it arrived; writing a `.zs` back uncompressed produces a file the game will not load
+and that still opens perfectly in the editor.
 
 ## Requirements
 
@@ -150,6 +413,9 @@ pnpm validate:astc  /path/to/vectors            # compare ASTC against astcenc
 pnpm diag:prt1 archive.szs Layout.bflyt         # which prt1 bytes the parser claims
 pnpm diag:pai1 /path/to/romfs                   # pai1 entries by target byte
 pnpm diag:bflan archive.szs Anim [section]      # one section, original beside rewritten
+
+pnpm cli <command>   # headless tools; `pnpm cli help` lists them
+pnpm mcp             # the MCP server, for Claude Code (docs/mcp.md)
 ```
 
 `pnpm lint` carries one rule that matters. The same mistake shipped twice — a `useMemo`

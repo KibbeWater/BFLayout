@@ -9,13 +9,15 @@ import {
   parseSarc,
   recoverSarcNames,
   replaceSarcEntry,
+  sarcAlignmentFor,
   sarcHash,
   writeSarc,
   type SarcArchive,
   type SarcEntry
 } from '@shared/formats/sarc'
 import type { ArchiveDescriptor, ArchiveEntryInfo } from '@shared/contract'
-import { FileNotFoundError, IoError, NotFoundError } from '@main/errors'
+import { FileNotFoundError, IoError, NotFoundError, ReadOnlyError } from '@main/errors'
+import { resolveWrite } from '@main/mod-layer'
 import { CompressionService } from './compression'
 import { FilesService } from './files'
 
@@ -195,6 +197,168 @@ export class ArchiveService extends Effect.Service<ArchiveService>()('ArchiveSer
         return describe(session)
       })
 
+    /**
+     * Why every structural edit checks the same thing first.
+     *
+     * Writing a SARC needs *every* entry's name, so one unnamed entry anywhere
+     * makes the whole archive unwritable. Adding, renaming or duplicating in such
+     * an archive would produce work that could never be saved — and a dirty
+     * archive refuses to close, so the only way out would be quitting and losing
+     * it. Refused up front, with the count, which is also the hint that recovering
+     * names is the thing to do next.
+     */
+    const requireWritable = (
+      session: OpenArchive,
+      what: string
+    ): Effect.Effect<void, FormatWriteError> => {
+      const unnamed = session.archive.entries.filter((entry) => entry.name === null)
+      if (unnamed.length === 0) return Effect.void
+      return Effect.fail(
+        new FormatWriteError({
+          format: 'sarc',
+          section: what,
+          message: `${unnamed.length} of ${session.archive.entries.length} entries in ${basename(session.path)} have no stored name, so this archive cannot be written back at all. Recover the names first.`
+        })
+      )
+    }
+
+    const withEntries = (session: OpenArchive, entries: SarcEntry[]): void => {
+      session.archive = { ...session.archive, entries }
+      session.dirty = true
+    }
+
+    /**
+     * Adds a file to the archive.
+     *
+     * Mods add files, and until now nothing here could: an archive could only ever
+     * have the entries it shipped with. The alignment is inherited from a sibling
+     * with the same extension where one exists — textures are aligned to 0x1000 in
+     * every archive in this dump, and getting that wrong is the kind of thing the
+     * game notices and nothing else does.
+     */
+    const addEntry = (
+      archiveId: string,
+      name: string,
+      data: Uint8Array
+    ): Effect.Effect<ArchiveDescriptor, NotFoundError | FormatWriteError> =>
+      Effect.gen(function* () {
+        const session = yield* get(archiveId)
+        yield* requireWritable(session, name)
+
+        if (findByKey(session.archive, name)) {
+          return yield* Effect.fail(
+            new FormatWriteError({
+              format: 'sarc',
+              section: name,
+              message: `${basename(session.path)} already has an entry called ${name}; replace it instead`
+            })
+          )
+        }
+
+        /*
+         * Alignment from the entry's *kind*, not from whichever sibling happens to
+         * share its extension. Inheriting was wrong exactly when it mattered: the
+         * first `.bntx` or `.bnsh` added to an archive that has none got 4 bytes,
+         * and a GPU resource off a page boundary crashes inside the driver's reader
+         * with nothing pointing at the packing.
+         */
+        withEntries(session, [
+          ...session.archive.entries,
+          {
+            nameHash: sarcHash(name, session.archive.hashKey),
+            name,
+            data,
+            originalOffset: 0,
+            // -1 means "not from the original file", which is what stops the writer
+            // trying to put it back at an offset it never had.
+            originalLength: -1,
+            alignment: sarcAlignmentFor(name)
+          }
+        ])
+        return describe(session)
+      })
+
+    const deleteEntry = (
+      archiveId: string,
+      key: string
+    ): Effect.Effect<ArchiveDescriptor, NotFoundError | FormatWriteError> =>
+      Effect.gen(function* () {
+        const session = yield* get(archiveId)
+        const entry = findByKey(session.archive, key)
+        if (!entry) {
+          return yield* Effect.fail(new NotFoundError({ kind: 'archive entry', id: key }))
+        }
+        yield* requireWritable(session, key)
+
+        withEntries(
+          session,
+          session.archive.entries.filter((candidate) => candidate !== entry)
+        )
+        return describe(session)
+      })
+
+    /**
+     * Renames an entry, which is a rehash rather than a relabel.
+     *
+     * SARC looks entries up by the hash of their name, so the stored hash has to be
+     * recomputed — a rename that changed only the string would produce an archive
+     * where the game cannot find the file it just read the name of.
+     */
+    const renameEntry = (
+      archiveId: string,
+      key: string,
+      name: string
+    ): Effect.Effect<ArchiveDescriptor, NotFoundError | FormatWriteError> =>
+      Effect.gen(function* () {
+        const session = yield* get(archiveId)
+        const entry = findByKey(session.archive, key)
+        if (!entry) {
+          return yield* Effect.fail(new NotFoundError({ kind: 'archive entry', id: key }))
+        }
+        yield* requireWritable(session, key)
+
+        if (name !== entry.name && findByKey(session.archive, name)) {
+          return yield* Effect.fail(
+            new FormatWriteError({
+              format: 'sarc',
+              section: name,
+              message: `${basename(session.path)} already has an entry called ${name}`
+            })
+          )
+        }
+
+        withEntries(
+          session,
+          session.archive.entries.map((candidate) =>
+            candidate === entry
+              ? {
+                  ...candidate,
+                  name,
+                  nameHash: sarcHash(name, session.archive.hashKey),
+                  // The bytes no longer belong at their original offset once the
+                  // name table around them has changed size.
+                  originalLength: -1
+                }
+              : candidate
+          )
+        )
+        return describe(session)
+      })
+
+    const duplicateEntry = (
+      archiveId: string,
+      key: string,
+      name: string
+    ): Effect.Effect<ArchiveDescriptor, NotFoundError | FormatWriteError> =>
+      Effect.gen(function* () {
+        const session = yield* get(archiveId)
+        const entry = findByKey(session.archive, key)
+        if (!entry) {
+          return yield* Effect.fail(new NotFoundError({ kind: 'archive entry', id: key }))
+        }
+        return yield* addEntry(archiveId, name, entry.data)
+      })
+
     /** Fills in missing names from candidates (layout txl1 lists, mostly). */
     const recoverNames = (
       archiveId: string,
@@ -210,8 +374,8 @@ export class ArchiveService extends Effect.Service<ArchiveService>()('ArchiveSer
       archiveId: string,
       targetPath?: string
     ): Effect.Effect<
-      ArchiveDescriptor,
-      NotFoundError | IoError | FormatWriteError | UnsupportedFormatError
+      { archive: ArchiveDescriptor; redirected: boolean },
+      NotFoundError | IoError | ReadOnlyError | FormatWriteError | UnsupportedFormatError
     > =>
       Effect.gen(function* () {
         const session = yield* get(archiveId)
@@ -228,12 +392,18 @@ export class ArchiveService extends Effect.Service<ArchiveService>()('ArchiveSer
         })
 
         const bytes = yield* compression.compress(packed, session.compression)
-        const destination = targetPath ?? session.path
+        /*
+         * An archive opened out of the pristine dump saves into the mod layer, and
+         * the session then points at the copy — so the next save writes there
+         * directly, and a layout tab backed by this archive stays attached to the
+         * file it will actually end up in.
+         */
+        const { path: destination, redirected } = resolveWrite(targetPath ?? session.path)
         yield* files.writeAtomic(destination, bytes)
 
         const saved: OpenArchive = { ...session, path: destination, dirty: false }
         open.set(archiveId, saved)
-        return describe(saved)
+        return { archive: describe(saved), redirected }
       })
 
     /**
@@ -247,7 +417,7 @@ export class ArchiveService extends Effect.Service<ArchiveService>()('ArchiveSer
       archiveId: string,
       key: string,
       path: string
-    ): Effect.Effect<{ path: string; bytes: number }, NotFoundError | IoError> =>
+    ): Effect.Effect<{ path: string; bytes: number }, NotFoundError | IoError | ReadOnlyError> =>
       Effect.gen(function* () {
         const data = yield* readEntry(archiveId, key)
         yield* files.writeAtomic(path, data)
@@ -256,6 +426,10 @@ export class ArchiveService extends Effect.Service<ArchiveService>()('ArchiveSer
 
     /**
      * Replaces one entry's bytes with the contents of a file.
+     *
+     * Still how a compressed texture is replaced: `TextureService.importPng` writes pixels
+     * into a container in place, which needs the size unchanged and the format uncompressed.
+     * A `.bntx` built elsewhere has neither restriction.
      *
      * The new bytes are sniffed and reported rather than checked: refusing anything this build
      * cannot parse would block the legitimate case of importing a format it does not model, and
@@ -316,6 +490,10 @@ export class ArchiveService extends Effect.Service<ArchiveService>()('ArchiveSer
       openPath,
       readEntry,
       replaceEntry,
+      addEntry,
+      deleteEntry,
+      renameEntry,
+      duplicateEntry,
       extractEntry,
       importEntry,
       recoverNames,

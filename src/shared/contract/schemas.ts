@@ -543,6 +543,419 @@ export const workspaceSnapshotSchema = z.object({
 
 export type WorkspaceSnapshot = z.infer<typeof workspaceSnapshotSchema>
 
+/**
+ * A mod project: the pristine dump, and the layer being built over it.
+ *
+ * Paths are absolute. `titleId` and `gameVersion` are optional to create but
+ * carried everywhere, because deploying and packaging both need the title id and
+ * a mod that does not declare the version it was built against cannot be
+ * version-gated on import.
+ */
+/**
+ * Per-project settings, every one of which exists because a real project needed
+ * it to be different.
+ *
+ * Defaults are the point: a project that never opens this is configured correctly
+ * for the common case. Each field carries its own default, so a stored blob
+ * missing half of them — written by an older build — still yields a complete
+ * settings object rather than resetting the rest.
+ */
+export const modProjectSettingsSchema = z.object({
+  /**
+   * Where a deploy installs. Null auto-detects Astris and Ryujinx, which is right
+   * until someone keeps their emulator data somewhere else.
+   */
+  emulatorDataDir: z.string().nullable().default(null),
+  /**
+   * Remove deployed files the mod no longer contains.
+   *
+   * On by default because the alternative is a reverted file the game still loads,
+   * which looks exactly like an edit that did not take. Off for a mod that shares
+   * its directory with something this app does not manage.
+   */
+  deployPrune: z.boolean().default(true),
+  /**
+   * Names that live in the mod folder but are not part of the mod.
+   *
+   * A romfs overlay is a mirror of the game's tree, so anything in it is handed to
+   * the game. Documentation is the thing people reliably put there anyway.
+   */
+  excludedFiles: z.array(z.string()).default(['README.md']),
+  /** ZSTD level for anything this app compresses. 17 is what these files ship at. */
+  zstdLevel: z.number().int().min(1).max(22).default(17),
+  /**
+   * Warn when a file's size changed and no resource size table ships with it.
+   *
+   * The most common way a mod that is more than same-sized asset swaps goes wrong.
+   * Off for a project that patches the table by some other means.
+   */
+  checkResourceSizeTable: z.boolean().default(true),
+  /**
+   * Warn when a mod file's name differs from a real one only by a compression
+   * suffix — the game asks for an exact path, so such a file is never loaded.
+   */
+  checkCompressionSuffix: z.boolean().default(true),
+  /**
+   * Folders to index, relative to the dump. Empty means all of it.
+   *
+   * A full romfs index reads every file; a project that only ever touches
+   * `Layout/` can say so and have it take seconds.
+   */
+  indexFolders: z.array(z.string()).default([])
+})
+
+export type ModProjectSettings = z.infer<typeof modProjectSettingsSchema>
+
+/** A complete settings object from nothing, which is what every default is for. */
+export const defaultProjectSettings = (): ModProjectSettings =>
+  modProjectSettingsSchema.parse({})
+
+export const modProjectSchema = z.object({
+  id: z.number().int(),
+  name: z.string(),
+  dumpPath: z.string(),
+  modPath: z.string(),
+  titleId: z.string(),
+  /**
+   * The mod's directory name under `mods/contents/<title id>/`. Empty means it is
+   * derived from the project name — which is only right for a mod that has nothing
+   * else installing into the same directory.
+   */
+  modName: z.string(),
+  gameVersion: z.string(),
+  settings: modProjectSettingsSchema,
+  active: z.boolean(),
+  createdAt: z.number().int(),
+  updatedAt: z.number().int()
+})
+
+export type ModProject = z.infer<typeof modProjectSchema>
+
+export const modProjectInputSchema = z.object({
+  name: z.string().min(1),
+  dumpPath: z.string().min(1),
+  modPath: z.string().min(1),
+  titleId: z.string().default(''),
+  modName: z.string().default(''),
+  gameVersion: z.string().default(''),
+  settings: modProjectSettingsSchema.partial().optional()
+})
+
+export type ModProjectInput = z.infer<typeof modProjectInputSchema>
+
+/**
+ * What the mod layer currently holds, for the header badge and the mod summary.
+ *
+ * `files` is relative to the mod root, which is the form every other part of the
+ * feature wants: it is the key into the pristine tree, the path inside a release
+ * zip, and what a deploy copies.
+ */
+export const modLayerStatusSchema = z.object({
+  project: modProjectSchema.nullable(),
+  files: z.array(
+    z.object({
+      relativePath: z.string(),
+      size: z.number().int(),
+      modifiedAt: z.number().int(),
+      /** False when the dump has no file at this path — the mod adds it outright. */
+      replacesPristine: z.boolean()
+    })
+  ),
+  totalBytes: z.number().int()
+})
+
+export type ModLayerStatus = z.infer<typeof modLayerStatusSchema>
+
+/** An emulator data directory a deploy could install into. */
+export const deployTargetSchema = z.object({
+  label: z.string(),
+  dataDir: z.string(),
+  /** False when the directory was looked for and is not there. Still listed, so
+   * the UI can say where it looked rather than only that it found nothing. */
+  exists: z.boolean()
+})
+
+export type DeployTarget = z.infer<typeof deployTargetSchema>
+
+export const deployResultSchema = z.object({
+  /** The mod's romfs directory inside the emulator's mods tree. */
+  target: z.string(),
+  dataDir: z.string(),
+  modName: z.string(),
+  copied: z.number().int(),
+  /**
+   * Files removed from the deployed copy because the mod no longer contains them.
+   * Reported rather than done quietly: a stale file the game still loads looks
+   * exactly like an edit that did not take.
+   */
+  removed: z.array(z.string()),
+  bytes: z.number().int()
+})
+
+export type DeployResult = z.infer<typeof deployResultSchema>
+
+/**
+ * One finding from checking a mod file.
+ *
+ * `error` means the file is very likely broken for the game; `warning` means it
+ * works but something about it deserves a second look; `info` is context, not a
+ * problem. Nothing here refuses to deploy — the judgement stays with the person
+ * who knows what they were trying to do.
+ */
+export const checkNoteSchema = z.object({
+  level: z.enum(['error', 'warning', 'info']),
+  message: z.string()
+})
+
+export type CheckNoteView = z.infer<typeof checkNoteSchema>
+
+export const modCheckedFileSchema = z.object({
+  relativePath: z.string(),
+  /** What the bytes turned out to be, by magic rather than extension. */
+  format: z.string(),
+  compression: compressionKindSchema,
+  replacesPristine: z.boolean(),
+  notes: z.array(checkNoteSchema)
+})
+
+export type ModCheckedFile = z.infer<typeof modCheckedFileSchema>
+
+export const modCheckReportSchema = z.object({
+  modPath: z.string(),
+  files: z.array(modCheckedFileSchema),
+  /**
+   * Findings about the mod as a whole rather than about one file — the resource
+   * size table being the one that matters, since it is a hazard no per-file check
+   * can see and the symptom looks nothing like the cause.
+   */
+  notes: z.array(checkNoteSchema),
+  errors: z.number().int(),
+  warnings: z.number().int()
+})
+
+export type ModCheckReport = z.infer<typeof modCheckReportSchema>
+
+/**
+ * What a name in the index turned out to be, and where it lives.
+ *
+ * `entryName` is set when the name was found inside an archive, which in a romfs
+ * is the usual case — the layouts are entries, not files.
+ */
+export const indexHitSchema = z.object({
+  kind: z.string(),
+  name: z.string(),
+  detail: z.string().nullable(),
+  /** Path below the indexed dump root. */
+  relativePath: z.string(),
+  entryName: z.string().nullable(),
+  format: z.string(),
+  rootPath: z.string()
+})
+
+export type IndexSearchHit = z.infer<typeof indexHitSchema>
+export type ReferenceHit = IndexSearchHit
+
+export const indexedDumpSchema = z.object({
+  rootPath: z.string(),
+  builtAt: z.number().int(),
+  fileCount: z.number().int(),
+  symbolCount: z.number().int()
+})
+
+/**
+ * How the current build is going, plus what is already indexed.
+ *
+ * Polled rather than pushed: it is one small object, the UI wants it on a timer
+ * regardless, and a push channel would be a second thing to keep alive across a
+ * build that can outlive the window that started it.
+ */
+export const indexProgressSchema = z.object({
+  state: z.enum(['idle', 'building', 'ready', 'failed']),
+  rootPath: z.string().nullable(),
+  done: z.number().int(),
+  total: z.number().int(),
+  currentFile: z.string().nullable(),
+  /** A summary when ready, the reason when failed. */
+  detail: z.string().nullable(),
+  indexed: z.array(indexedDumpSchema)
+})
+
+export type IndexProgress = z.infer<typeof indexProgressSchema>
+
+/**
+ * What the running game last said it was showing.
+ *
+ * `screen` is the game's own name for it — Colony's SDK already deals in these
+ * (`open_screen("ScreenDialog")`). The rest is whatever the plugin can supply;
+ * none of it is required, because a screen name alone is enough to search for.
+ */
+export const gameScreenReportSchema = z.object({
+  screen: z.string(),
+  layout: z.string().nullable(),
+  archive: z.string().nullable(),
+  detail: z.string().nullable(),
+  receivedAt: z.number().int()
+})
+
+export type GameScreenReport = z.infer<typeof gameScreenReportSchema>
+
+export const gameLinkStatusSchema = z.object({
+  listening: z.boolean(),
+  port: z.number().int(),
+  last: gameScreenReportSchema.nullable(),
+  /** A failure after startup, so a dead listener is visible rather than merely quiet. */
+  error: z.string().nullable()
+})
+
+export type GameLinkStatus = z.infer<typeof gameLinkStatusSchema>
+
+/**
+ * One MCP tool call, as it happened.
+ *
+ * Recorded so the work an agent does to your files is something you watch rather
+ * than infer. A tool with write access that leaves no trace is one you have to
+ * trust blindly.
+ */
+export const mcpActivitySchema = z.object({
+  tool: z.string(),
+  /** Truncated: a base64 image or a whole YAML document would swamp the panel. */
+  input: z.string(),
+  summary: z.string(),
+  ok: z.boolean(),
+  at: z.number().int()
+})
+
+export type McpActivity = z.infer<typeof mcpActivitySchema>
+
+export const mcpStatusSchema = z.object({
+  listening: z.boolean(),
+  port: z.number().int(),
+  error: z.string().nullable(),
+  calls: z.number().int(),
+  /** Files an agent has written that the app may have open and stale. */
+  edited: z.array(z.string())
+})
+
+export type McpStatus = z.infer<typeof mcpStatusSchema>
+
+/**
+ * One string in a message table.
+ *
+ * `text` renders inline commands as `{n:group.type}` placeholders. They can be
+ * moved, repeated or removed while editing — moving a variable substitution to a
+ * different point in a sentence is most of what translating is — but not invented,
+ * because a placeholder the message never had has no payload to write.
+ */
+export const messageEntrySchema = z.object({
+  index: z.number().int(),
+  label: z.string(),
+  text: z.string(),
+  /** True when the string carries something the editor cannot express as plain text. */
+  hasCommands: z.boolean()
+})
+
+export const messageTableSchema = z.object({
+  displayName: z.string(),
+  encoding: z.enum(['utf-8', 'utf-16']),
+  littleEndian: z.boolean(),
+  version: z.number().int(),
+  sections: z.array(z.string()),
+  messages: z.array(messageEntrySchema)
+})
+
+export type MessageTable = z.infer<typeof messageTableSchema>
+
+export const messageReplaceResultSchema = z.object({
+  dryRun: z.boolean(),
+  root: z.string(),
+  /** Where writes landed, when a mod project redirected them. */
+  modPath: z.string().nullable(),
+  totalMessages: z.number().int(),
+  files: z.array(
+    z.object({
+      relativePath: z.string(),
+      changed: z.number().int(),
+      /**
+       * A sample of before/after pairs. A batch edit over thousands of strings that
+       * reports only a count is one nobody can check.
+       */
+      examples: z.array(
+        z.object({ label: z.string(), before: z.string(), after: z.string() })
+      ),
+      /** Why this file was left alone, when it matched but could not be rewritten. */
+      refused: z.string().nullable()
+    })
+  )
+})
+
+export type MessageReplaceResult = z.infer<typeof messageReplaceResultSchema>
+
+/**
+ * One structural change between the dump's copy of a file and the mod's.
+ *
+ * Phrased for a person, because this is what a release note and a review are made
+ * of. A byte diff of a layout is unreadable and a byte diff of a `.szs` is worse —
+ * recompression moves everything.
+ */
+export const layoutChangeSchema = z.object({
+  kind: z.string(),
+  target: z.string(),
+  detail: z.string()
+})
+
+export const modFileDiffSchema = z.object({
+  relativePath: z.string(),
+  /** True when the dump has nothing at this path. */
+  isNew: z.boolean(),
+  /** One line, already grouped: "3 panes moved, 1 material changed". */
+  summary: z.string(),
+  changes: z.array(layoutChangeSchema),
+  /** Entry names that differ, for an archive. */
+  entries: z.array(z.string())
+})
+
+export type ModFileDiff = z.infer<typeof modFileDiffSchema>
+
+export const modDiffReportSchema = z.object({
+  modPath: z.string(),
+  dumpPath: z.string(),
+  files: z.array(modFileDiffSchema),
+  totalChanges: z.number().int()
+})
+
+export type ModDiffReport = z.infer<typeof modDiffReportSchema>
+
+export const modPackageResultSchema = z.object({
+  path: z.string(),
+  fileCount: z.number().int(),
+  bytes: z.number().int(),
+  titleId: z.string(),
+  gameVersion: z.string()
+})
+
+export type ModPackageResult = z.infer<typeof modPackageResultSchema>
+
+/**
+ * What a package says about itself, read without installing it.
+ *
+ * The separation matters: a mod built against a different game build does not fail
+ * cleanly — it loads and the game misbehaves — so the version has to be checked
+ * before any bytes reach disk, not after.
+ */
+export const modPackageInfoSchema = z.object({
+  path: z.string(),
+  name: z.string().nullable(),
+  version: z.string().nullable(),
+  author: z.string().nullable(),
+  titleId: z.string().nullable(),
+  gameVersion: z.string().nullable(),
+  files: z.array(z.string()),
+  /** Everything worth knowing before installing, phrased plainly. */
+  warnings: z.array(z.string())
+})
+
+export type ModPackageInfo = z.infer<typeof modPackageInfoSchema>
+
 export const folderEntryKindSchema = z.enum([
   'directory',
   'layout',
@@ -562,14 +975,38 @@ export const folderEntryKindSchema = z.enum([
 
 export type FolderEntryKind = z.infer<typeof folderEntryKindSchema>
 
+/**
+ * Where a browsed file comes from once a mod project is open.
+ *
+ * `pristine` is the dump's own copy, untouched. `modified` means the mod layer
+ * holds a file at the same relative path, which is the one the game would load —
+ * so that is the one `path` points at. `added` is a file the mod introduces that
+ * the dump has no counterpart for.
+ *
+ * `pristine` is also what every entry reports when no project is active, which is
+ * what keeps the plain file-browser case unchanged.
+ */
+export const folderOriginSchema = z.enum(['pristine', 'modified', 'added'])
+export type FolderOrigin = z.infer<typeof folderOriginSchema>
+
 export const folderEntrySchema = z.object({
   name: z.string(),
+  /**
+   * What opening this row opens. For a `modified` row that is the mod's copy, not
+   * the dump's — the browser shows what the game would load, the same way the
+   * emulator's LayeredFS resolves it.
+   */
   path: z.string(),
   kind: folderEntryKindSchema,
   /** Bytes on disk; 0 for directories. */
   size: z.number().int().nonnegative(),
   /** True when the name ends in .zs or .szs, so it needs decompressing first. */
-  compressed: z.boolean()
+  compressed: z.boolean(),
+  origin: folderOriginSchema,
+  /** The dump's own copy, present only when this row shadows one. */
+  pristinePath: z.string().optional(),
+  /** Path below the mod root, for reverting. Present on `modified` and `added`. */
+  relativePath: z.string().optional()
 })
 
 export type FolderEntry = z.infer<typeof folderEntrySchema>

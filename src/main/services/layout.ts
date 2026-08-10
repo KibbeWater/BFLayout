@@ -17,7 +17,8 @@ import {
   type LayoutSource,
   type OpenLayoutResult
 } from '@shared/contract'
-import { FileNotFoundError, IoError, NotFoundError } from '@main/errors'
+import { FileNotFoundError, IoError, NotFoundError, ReadOnlyError } from '@main/errors'
+import { resolveWrite } from '@main/mod-layer'
 import { ArchiveService } from './archive'
 import { FilesService } from './files'
 
@@ -154,11 +155,13 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
         source: LayoutSource
         displayName: string
         snapshotKey: string
+        redirected: boolean
       },
-      NotFoundError | IoError | FormatWriteError | UnsupportedFormatError
+      NotFoundError | IoError | ReadOnlyError | FormatWriteError | UnsupportedFormatError
     > =>
       Effect.gen(function* () {
         const session = yield* get(documentId)
+        let redirected = false
 
         if (targetPath && session.source.kind === 'archive') {
           return yield* Effect.fail(
@@ -183,7 +186,21 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
         })
 
         if (session.source.kind === 'file') {
-          const destination = targetPath ?? session.source.path
+          /*
+           * With a mod project open, a save of a file that came out of the pristine
+           * dump lands in the mod layer instead — the copy-on-write that makes a
+           * mod a *layer* rather than a set of edited game files.
+           *
+           * The session is then retargeted at the copy, which is the same thing a
+           * save-as does and for the same reason: the next plain save must go where
+           * this one went. It also means the tab's crash-recovery key follows the
+           * file, so a crash after the first save restores into the mod copy rather
+           * than proposing to write the dump.
+           */
+          const { path: destination, redirected: intoLayer } = resolveWrite(
+            targetPath ?? session.source.path
+          )
+          redirected = intoLayer
           yield* files.writeAtomic(destination, encoded)
           // A save-as retargets the session, so the next plain save goes to the
           // new file rather than silently back to the original.
@@ -204,7 +221,8 @@ export class LayoutService extends Effect.Service<LayoutService>()('LayoutServic
           source: session.source,
           displayName: session.displayName,
           // Derived from the retargeted source, not the one the save started with.
-          snapshotKey: yield* durableKey(session.source)
+          snapshotKey: yield* durableKey(session.source),
+          redirected
         }
       })
 

@@ -83,13 +83,15 @@ export function useSave(): SaveControls {
           documentId: target.documentId,
           document: target.document
         })
-        const archive = await client.archive.save({
+        const { archive, redirected } = await client.archive.save({
           archiveId: target.source.archiveId,
           ...(targetPath ? { path: targetPath } : {})
         })
         reportSuccess(
-          targetPath ? 'Saved a copy' : 'Saved',
-          `${target.displayName} (${result.bytes} bytes) written into ${archive.displayName}.`
+          redirected ? 'Saved into the mod' : targetPath ? 'Saved a copy' : 'Saved',
+          redirected
+            ? `${target.displayName} (${result.bytes} bytes) written into ${archive.displayName}, copied into your mod folder at ${archive.path}. The dump is untouched.`
+            : `${target.displayName} (${result.bytes} bytes) written into ${archive.displayName}.`
         )
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: orpc.archive.get.key() }),
@@ -111,8 +113,10 @@ export function useSave(): SaveControls {
         })
         retarget(target.documentId, result.source, result.displayName, result.snapshotKey)
         reportSuccess(
-          targetPath ? 'Saved a copy' : 'Saved',
-          `${result.displayName} written (${result.bytes} bytes).`
+          result.redirected ? 'Saved into the mod' : targetPath ? 'Saved a copy' : 'Saved',
+          result.redirected && result.source.kind === 'file'
+            ? `${result.displayName} (${result.bytes} bytes) copied into your mod folder at ${result.source.path}. The dump is untouched, and this tab now edits the mod's copy.`
+            : `${result.displayName} written (${result.bytes} bytes).`
         )
         if (result.source.kind === 'file') await noteRecent(result.source.path, 'layout')
       }

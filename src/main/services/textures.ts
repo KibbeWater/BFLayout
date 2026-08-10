@@ -3,18 +3,26 @@ import { basename, dirname, join } from 'node:path'
 import { nativeImage } from 'electron'
 import { Effect } from 'effect'
 
-import { FormatParseError, UnsupportedFormatError } from '@shared/binary/errors'
+import { FormatParseError, FormatWriteError, UnsupportedFormatError } from '@shared/binary/errors'
 import {
   decodeTexture,
+  encodeSurface,
+  formatInfo,
   formatName,
+  halveRgba,
   isBntx,
   isFormatSupported,
+  mipBlockHeightLog2,
   parseBntx,
+  swizzle,
+  whyNotEncodable,
+  divRoundUp,
   type BntxContainer,
   type BntxTexture
 } from '@shared/formats/bntx'
 import type { DecodedTexture, LayoutSource, TextureInfo, TextureList } from '@shared/contract'
-import { FileNotFoundError, IoError, NotFoundError } from '@main/errors'
+import { FileNotFoundError, IoError, NotFoundError, ReadOnlyError } from '@main/errors'
+import { resolveWrite } from '@main/mod-layer'
 import { ArchiveService } from './archive'
 import { FilesService } from './files'
 
@@ -31,6 +39,19 @@ interface Provider {
    */
   readonly fromDisk: boolean
   readonly load: Effect.Effect<Uint8Array, FileNotFoundError | IoError | NotFoundError>
+  /**
+   * Where a rewritten container goes back to.
+   *
+   * Carried on the provider because that is the only place that still knows
+   * whether these bytes came off disk or out of an archive — by the time a texture
+   * has been resolved, all that survives is a label.
+   */
+  readonly write: (
+    bytes: Uint8Array
+  ) => Effect.Effect<
+    { path: string | null; redirected: boolean },
+    IoError | ReadOnlyError | NotFoundError | FormatWriteError
+  >
 }
 
 /** A resolved texture: which container holds it and where inside it. */
@@ -123,7 +144,20 @@ export class TextureService extends Effect.Service<TextureService>()('TextureSer
             for (const name of names) {
               if (!name.toLowerCase().endsWith(TEXTURE_EXTENSION)) continue
               const path = join(folder, name)
-              providers.push({ label: path, fromDisk: true, load: files.read(path) })
+              providers.push({
+                label: path,
+                fromDisk: true,
+                load: files.read(path),
+                write: (bytes) =>
+                  Effect.gen(function* () {
+                    // Through the mod layer like every other write, so importing a
+                    // texture into a dump's container produces a copy in the mod.
+                    const resolved = resolveWrite(path)
+                    yield* files.writeAtomic(resolved.path, bytes)
+                    byPath.delete(path)
+                    return { path: resolved.path, redirected: resolved.redirected }
+                  })
+              })
             }
           }
           return providers
@@ -157,7 +191,17 @@ export class TextureService extends Effect.Service<TextureService>()('TextureSer
                   ? entry.displayName
                   : `${descriptor.displayName}:${entry.displayName}`,
               fromDisk: false,
-              load: archives.readEntry(archiveId, entry.key)
+              load: archives.readEntry(archiveId, entry.key),
+              write: (bytes) =>
+                Effect.gen(function* () {
+                  /*
+                   * Into the in-memory archive. The bytes reach disk when the
+                   * archive is saved, which is also what routes them through the
+                   * mod layer — the same two-step a layout save takes.
+                   */
+                  yield* archives.replaceEntry(archiveId, entry.key, bytes)
+                  return { path: null, redirected: false }
+                })
             })
           }
         }
@@ -413,7 +457,187 @@ export class TextureService extends Effect.Service<TextureService>()('TextureSer
         }
       })
 
-    return { list, get, exportPng } as const
+    /**
+     * Replaces one texture's pixels from a PNG, in place.
+     *
+     * "In place" is the whole design. The container's structure — every offset, the
+     * BRTI blocks, and the relocation table `nn::gfx` uses to fix up pointers at
+     * load — is left exactly as it was, and only the pixel bytes change. Rebuilding
+     * a BNTX would mean reproducing that relocation table, and getting it subtly
+     * wrong produces a file this app reads back perfectly and the game refuses:
+     * precisely the failure nobody would attribute to the tool.
+     *
+     * The cost of that safety is the two refusals below. The replacement has to
+     * match the original's dimensions, and the original has to be in a format there
+     * is an encoder for — which means uncompressed, because compressing to BCn or
+     * ASTC well is a search, not a conversion. Both are reported as what to do
+     * instead rather than as a failure.
+     */
+    const importPng = (
+      source: LayoutSource,
+      name: string,
+      pngPath: string
+    ): Effect.Effect<
+      {
+        container: string
+        width: number
+        height: number
+        mipsWritten: number
+        path: string | null
+        redirected: boolean
+      },
+      | FileNotFoundError
+      | IoError
+      | ReadOnlyError
+      | NotFoundError
+      | UnsupportedFormatError
+      | FormatParseError
+      | FormatWriteError
+    > =>
+      Effect.gen(function* () {
+        const providers = yield* providersFor(source)
+        const wanted = normalizeName(name)
+
+        let found: { provider: Provider; container: BntxContainer; texture: BntxTexture } | null =
+          null
+        for (const provider of providers) {
+          const container = yield* containerOf(provider)
+          if ('error' in container) continue
+          const texture = container.textures.find((entry) => normalizeName(entry.name) === wanted)
+          if (texture) {
+            found = { provider, container, texture }
+            break
+          }
+        }
+        if (!found) {
+          return yield* Effect.fail(new NotFoundError({ kind: 'texture', id: name }))
+        }
+
+        const { provider, texture } = found
+
+        const refusal = whyNotEncodable(texture.format, texture.formatVariant)
+        if (refusal !== null) {
+          return yield* Effect.fail(new FormatWriteError({ format: 'bntx', section: name, message: refusal }))
+        }
+        const info = formatInfo(texture.format)
+        if (!info) {
+          return yield* Effect.fail(
+            new FormatWriteError({
+              format: 'bntx',
+              section: name,
+              message: `${formatName(texture.format, texture.formatVariant)} has no known memory layout`
+            })
+          )
+        }
+
+        // Electron's decoder, rather than a hand-rolled one. It reads PNG, JPEG and
+        // the platform's own formats, and it is already the encoder used by export.
+        const image = yield* Effect.try({
+          try: () => {
+            const decodedImage = nativeImage.createFromPath(pngPath)
+            if (decodedImage.isEmpty()) {
+              throw new Error('the file could not be decoded as an image')
+            }
+            return decodedImage
+          },
+          catch: (cause) =>
+            new IoError({
+              path: pngPath,
+              detail: `could not read ${basename(pngPath)} as an image: ${
+                cause instanceof Error ? cause.message : String(cause)
+              }`
+            })
+        })
+
+        const size = image.getSize()
+        if (size.width !== texture.width || size.height !== texture.height) {
+          return yield* Effect.fail(
+            new FormatWriteError({
+              format: 'bntx',
+              section: name,
+              message: `${basename(pngPath)} is ${size.width}x${size.height} but ${name} is ${texture.width}x${texture.height}. Writing in place cannot change a texture's size — every offset in the container is built around it. Resize the image, or build a replacement .bntx and use Replace on the archive entry.`
+            })
+          )
+        }
+
+        // toBitmap gives premultiplied BGRA; the encoders want straight RGBA.
+        let level = straightRgba(new Uint8Array(image.toBitmap()))
+        let levelWidth = texture.width
+        let levelHeight = texture.height
+
+        const original = yield* provider.load
+        const rewritten = new Uint8Array(original)
+        let mipsWritten = 0
+
+        for (let mip = 0; mip < texture.mipCount; mip++) {
+          const offset = texture.dataOffset + (texture.mipOffsets[mip] ?? 0)
+          const blockHeightLog2 = mipBlockHeightLog2(
+            divRoundUp(levelHeight, info.blockHeight),
+            texture.blockHeightLog2
+          )
+
+          const surface = swizzle(
+            levelWidth,
+            levelHeight,
+            info.blockWidth,
+            info.blockHeight,
+            info.bytesPerBlock,
+            texture.tileMode,
+            blockHeightLog2,
+            encodeSurface(level, levelWidth, levelHeight, texture.format, texture.formatVariant)
+          )
+
+          /*
+           * A mip whose tiled size does not match what the file reserved for it is
+           * where an in-place write stops being safe: writing it would run into the
+           * next level, or the next texture. Everything written so far is discarded
+           * — nothing has touched disk yet — and the refusal names the level.
+           */
+          const available =
+            mip + 1 < texture.mipCount
+              ? (texture.mipOffsets[mip + 1] ?? texture.imageData.length) -
+                (texture.mipOffsets[mip] ?? 0)
+              : texture.imageData.length - (texture.mipOffsets[mip] ?? 0)
+
+          if (surface.length > available || offset + surface.length > rewritten.length) {
+            return yield* Effect.fail(
+              new FormatWriteError({
+                format: 'bntx',
+                section: name,
+                message: `mip level ${mip} re-encodes to ${surface.length} bytes but the container reserved ${available}. Nothing has been written. This is a layout BFLayout does not reproduce exactly — please report the texture.`
+              })
+            )
+          }
+
+          rewritten.set(surface, offset)
+          mipsWritten += 1
+
+          if (mip + 1 < texture.mipCount) {
+            const halved = halveRgba(level, levelWidth, levelHeight)
+            level = halved.data
+            levelWidth = halved.width
+            levelHeight = halved.height
+          }
+        }
+
+        const written = yield* provider.write(rewritten)
+
+        // The decoded cache is keyed by the parsed texture object, which is about to
+        // be replaced; dropping the parse forces both to be rebuilt from new bytes.
+        parsed.delete(original)
+        byPath.delete(provider.label)
+
+        return {
+          container: provider.label,
+          width: texture.width,
+          height: texture.height,
+          mipsWritten,
+          path: written.path,
+          redirected: written.redirected
+        }
+      })
+
+    return { list, get, exportPng, importPng } as const
   })
 }) {}
 
@@ -430,6 +654,32 @@ export class TextureService extends Effect.Service<TextureService>()('TextureSer
  * why a signature-and-size check never noticed, but anything translucent — most UI art —
  * was exported with its colours pushed toward white.
  */
+/**
+ * Premultiplied BGRA — what Electron's bitmaps carry — back to straight RGBA.
+ *
+ * Undoing the multiply is lossy where alpha is low, which is unavoidable: the
+ * precision was thrown away when the image was premultiplied. Fully transparent
+ * pixels keep their colour at zero rather than dividing by it.
+ */
+export function straightRgba(bgra: Uint8Array): Uint8Array {
+  const out = new Uint8Array(bgra.length)
+  for (let at = 0; at < bgra.length; at += 4) {
+    const alpha = bgra[at + 3]!
+    if (alpha === 255 || alpha === 0) {
+      out[at] = bgra[at + 2]!
+      out[at + 1] = bgra[at + 1]!
+      out[at + 2] = bgra[at]!
+      out[at + 3] = alpha
+      continue
+    }
+    out[at] = Math.min(255, Math.round((bgra[at + 2]! * 255) / alpha))
+    out[at + 1] = Math.min(255, Math.round((bgra[at + 1]! * 255) / alpha))
+    out[at + 2] = Math.min(255, Math.round((bgra[at]! * 255) / alpha))
+    out[at + 3] = alpha
+  }
+  return out
+}
+
 export function premultipliedBgra(rgba: Uint8Array): Uint8Array {
   const out = new Uint8Array(rgba.length)
   for (let i = 0; i < rgba.length; i += 4) {

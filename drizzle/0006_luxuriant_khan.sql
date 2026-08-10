@@ -1,0 +1,1 @@
+ALTER TABLE `projects` ADD `mod_name` text DEFAULT '' NOT NULL;

@@ -1,4 +1,15 @@
-import { BrowserWindow, Menu, app, type MenuItemConstructorOptions } from 'electron'
+import { release } from 'node:os'
+import {
+  BrowserWindow,
+  Menu,
+  app,
+  clipboard,
+  dialog,
+  shell,
+  type MenuItemConstructorOptions
+} from 'electron'
+
+import { showHelp } from './help'
 
 /**
  * The application menu.
@@ -29,7 +40,25 @@ export function buildMenu(): void {
 
   const template: MenuItemConstructorOptions[] = [
     ...(isMac
-      ? ([{ role: 'appMenu' }] as MenuItemConstructorOptions[])
+      ? ([
+          {
+            role: 'appMenu',
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              // ⌘, is where macOS puts preferences and where people look for them.
+              item('Settings…', 'open-settings', 'CmdOrCtrl+,'),
+              { type: 'separator' },
+              { role: 'services' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' }
+            ]
+          }
+        ] as MenuItemConstructorOptions[])
       : []),
     {
       label: 'File',
@@ -40,6 +69,8 @@ export function buildMenu(): void {
         item('Save', 'save', 'CmdOrCtrl+S'),
         item('Save As…', 'save-as', 'CmdOrCtrl+Shift+S'),
         { type: 'separator' },
+        // On macOS this lives in the app menu instead.
+        ...(isMac ? [] : [item('Settings…', 'open-settings', 'CmdOrCtrl+,')]),
         isMac ? { role: 'close' } : { role: 'quit' }
       ]
     },
@@ -81,9 +112,95 @@ export function buildMenu(): void {
         { role: 'togglefullscreen' }
       ]
     },
-    { role: 'windowMenu' }
+    { role: 'windowMenu' },
+    {
+      /*
+       * `role: 'help'` rather than a plain label. On macOS that is what makes this
+       * *the* Help menu — it gets the system search field that indexes the other
+       * menus, and it is where the OS expects to find it. A menu merely called
+       * "Help" gets neither.
+       */
+      role: 'help',
+      submenu: [
+        {
+          label: 'BFLayout Documentation',
+          click: () => showHelp('README.md')
+        },
+        {
+          label: 'Modding: Projects, Deploy and Packaging',
+          click: () => showHelp('README.md#modding')
+        },
+        { type: 'separator' },
+        {
+          label: 'Keyboard Shortcuts',
+          click: () => showHelp('README.md#keyboard')
+        },
+        item('Show All Shortcuts…', 'show-shortcuts', 'CmdOrCtrl+/'),
+        { type: 'separator' },
+        {
+          label: 'Using BFLayout with Claude Code (MCP)',
+          click: () => showHelp('docs/mcp.md')
+        },
+        {
+          label: 'Game Link: Jump to the Screen the Game Is Showing',
+          click: () => showHelp('docs/game-link.md')
+        },
+        { type: 'separator' },
+        {
+          label: 'Reveal Application Data…',
+          /*
+           * Where the database, the dump index and the crash-recovery snapshots
+           * live. It is the first thing anyone needs when something is wrong and
+           * the last thing they can find, since macOS hides ~/Library.
+           */
+          click: () => void shell.openPath(app.getPath('userData'))
+        },
+        {
+          label: 'Report a Problem…',
+          click: () => void reportProblem()
+        }
+      ]
+    }
   ]
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
-  void app
+}
+
+const ISSUES_URL = 'https://github.com/KibbeWater/BFLayout/issues'
+
+/**
+ * Puts the details a bug report needs on the clipboard, then opens the issue list.
+ *
+ * The versions are the whole point. "It crashed opening a layout" is unactionable;
+ * the same sentence with the app, Electron and OS versions under it is a bug
+ * someone can start on. Asking a person to find those themselves is asking them
+ * not to bother.
+ *
+ * It opens the issue *list* rather than a prefilled new issue: a duplicate is worth
+ * finding first, and nothing here submits anything on anyone's behalf.
+ */
+async function reportProblem(): Promise<void> {
+  const details = [
+    `BFLayout ${app.getVersion()}`,
+    `Electron ${process.versions['electron'] ?? 'unknown'} · Chromium ${process.versions['chrome'] ?? 'unknown'} · Node ${process.versions['node'] ?? 'unknown'}`,
+    `${process.platform} ${process.arch} · ${release()}`,
+    `Packaged: ${app.isPackaged ? 'yes' : 'no (running from source)'}`,
+    '',
+    'What I did:',
+    'What I expected:',
+    'What happened instead:'
+  ].join('\n')
+
+  clipboard.writeText(details)
+
+  const answer = await dialog.showMessageBox({
+    type: 'info',
+    message: 'Details copied to the clipboard',
+    detail: `${details}\n\nPaste this into the issue. Opening the issue list now — please check whether it has already been reported.`,
+    buttons: ['Open Issues', 'Cancel'],
+    defaultId: 0,
+    cancelId: 1
+  })
+
+  if (answer.response === 0) await shell.openExternal(ISSUES_URL)
 }

@@ -4,6 +4,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { FileUp, FolderOpen, History, Layers, LifeBuoy, Loader2, Pin, X } from 'lucide-react'
 
 import { getClient, getOrpc } from '@renderer/lib/orpc'
+import { ProjectCard } from '@renderer/components/project-card'
 import { reportError, reportInfo, reportSuccess } from '@renderer/lib/toast'
 import { useDocuments } from '@renderer/editor/store/document'
 import { useOpenFile } from '@renderer/lib/use-open-file'
@@ -265,6 +266,7 @@ export function WelcomeScreen(): ReactNode {
 
       <RecoveryCard />
       <SessionCard />
+      <ProjectCard />
 
       <div className="flex flex-wrap items-center justify-center gap-2">
         <button

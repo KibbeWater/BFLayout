@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
   Box,
@@ -15,8 +15,9 @@ import {
 } from 'lucide-react'
 
 import type { LayoutSource, Preview } from '@shared/contract'
-import { getOrpc } from '@renderer/lib/orpc'
+import { getClient, getOrpc } from '@renderer/lib/orpc'
 import { describeError } from '@renderer/lib/errors'
+import { reportError, reportSuccess } from '@renderer/lib/toast'
 import { BymlTree } from '@renderer/editor/panels/byml-viewer'
 
 /**
@@ -96,7 +97,7 @@ export function PreviewPanel({
             {describeError(preview.error).detail}
           </Centre>
         ) : preview.data ? (
-          <Body preview={preview.data} />
+          <Body preview={preview.data} source={source} />
         ) : null}
       </div>
     </div>
@@ -160,7 +161,7 @@ const KIND_STYLE: Record<
   }
 }
 
-function Body({ preview }: { preview: Preview }): ReactNode {
+function Body({ preview, source }: { preview: Preview; source: LayoutSource }): ReactNode {
   const content = preview.content
   switch (content.kind) {
     case 'font':
@@ -168,7 +169,7 @@ function Body({ preview }: { preview: Preview }): ReactNode {
     case 'data':
       return <BymlTree document={content.document} />
     case 'messages':
-      return <MessageList content={content} />
+      return <MessageList content={content} source={source} />
     case 'model':
       return <ModelBody content={content} />
     case 'parameters':
@@ -332,23 +333,74 @@ function FontBody({
  * them.
  */
 function MessageList({
-  content
+  content,
+  source
 }: {
   content: Extract<Preview['content'], { kind: 'messages' }>
+  source: LayoutSource
 }): ReactNode {
+  const orpc = getOrpc()
+  const queryClient = useQueryClient()
   const [filter, setFilter] = useState('')
+  /** Edited text by message index. Only what changed is ever sent. */
+  const [drafts, setDrafts] = useState<Record<number, string>>({})
+  const [saving, setSaving] = useState(false)
+
+  /*
+   * The preview truncates its message list — a table can hold thousands of strings
+   * and the panel only ever showed the first slice. Editing needs the real thing,
+   * so the authoritative table is loaded separately and the preview's copy is only
+   * what fills the panel until it arrives.
+   */
+  const table = useQuery(orpc.messages.open.queryOptions({ input: { source } }))
+
+  const messages = table.data?.messages ?? content.messages
   const needle = filter.trim().toLowerCase()
   const shown = useMemo(
     () =>
       needle === ''
-        ? content.messages
-        : content.messages.filter(
+        ? messages
+        : messages.filter(
             (message) =>
               message.label.toLowerCase().includes(needle) ||
               message.text.toLowerCase().includes(needle)
           ),
-    [content.messages, needle]
+    [messages, needle]
   )
+
+  const edited = Object.entries(drafts).filter(([index, text]) => {
+    const original = messages.find((message) => message.index === Number(index))
+    return original !== undefined && original.text !== text
+  })
+
+  const save = (): void => {
+    if (edited.length === 0) return
+    setSaving(true)
+    void (async () => {
+      try {
+        const result = await getClient().messages.save({
+          source,
+          edits: edited.map(([index, text]) => ({ index: Number(index), text }))
+        })
+        setDrafts({})
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: orpc.messages.open.key() }),
+          queryClient.invalidateQueries({ queryKey: orpc.preview.open.key() }),
+          queryClient.invalidateQueries({ queryKey: orpc.project.status.key() })
+        ])
+        reportSuccess(
+          result.redirected ? 'Saved into the mod' : 'Saved',
+          result.path === null
+            ? `${result.changed} message${result.changed === 1 ? '' : 's'} written into the archive. Save the archive to put it on disk.`
+            : `${result.changed} message${result.changed === 1 ? '' : 's'} written to ${result.path}.`
+        )
+      } catch (cause) {
+        reportError(cause, { retry: save })
+      } finally {
+        setSaving(false)
+      }
+    })()
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -361,30 +413,71 @@ function MessageList({
             className="w-full rounded border bg-input/40 px-1.5 py-1 text-xs outline-none"
           />
           <span className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground">
-            {shown.length === content.total
-              ? `${content.total} messages`
-              : `${shown.length} of ${content.total}`}
+            {shown.length === messages.length
+              ? `${messages.length} messages`
+              : `${shown.length} of ${messages.length}`}
             {' · '}
             {content.encoding}
           </span>
+          <button
+            type="button"
+            onClick={save}
+            disabled={saving || edited.length === 0}
+            className="shrink-0 rounded border px-2 py-1 text-[11px] hover:bg-accent disabled:opacity-40"
+            title={
+              edited.length === 0
+                ? 'Nothing edited yet'
+                : `Write ${edited.length} changed message${edited.length === 1 ? '' : 's'}`
+            }
+          >
+            {saving ? 'Saving…' : `Save${edited.length > 0 ? ` (${edited.length})` : ''}`}
+          </button>
         </div>
-        {content.messages.length < content.total ? (
-          <p className="mt-1 text-[11px] text-amber-500">
-            Showing the first {content.messages.length} of {content.total}; filtering searches
-            those.
+        {table.isPending && content.messages.length < content.total ? (
+          <p className="mt-1 text-[11px] text-muted-foreground/60">
+            Loading the rest of the table…
           </p>
         ) : null}
       </div>
 
       <ul className="min-h-0 flex-1 overflow-auto p-2">
-        {shown.map((message) => (
-          <li key={`${message.index}-${message.label}`} className="mb-1.5 rounded border p-2">
-            <p className="font-mono text-[11px] text-muted-foreground">{message.label}</p>
-            <p className="mt-0.5 select-text whitespace-pre-wrap break-words text-xs">
-              {renderText(message.text)}
-            </p>
-          </li>
-        ))}
+        {shown.map((message) => {
+          const draft = drafts[message.index]
+          const dirty = draft !== undefined && draft !== message.text
+          return (
+            <li
+              key={`${message.index}-${message.label}`}
+              className={`mb-1.5 rounded border p-2 ${dirty ? 'border-primary/60' : ''}`}
+            >
+              <p className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
+                <span className="min-w-0 flex-1 truncate">{message.label}</span>
+                {'hasCommands' in message && message.hasCommands ? (
+                  <span
+                    className="shrink-0 rounded bg-muted/60 px-1 text-[9px] uppercase"
+                    title="Carries inline commands. The {n:…} placeholders can be moved, repeated or removed — but not invented, since each one carries data the placeholder cannot show."
+                  >
+                    cmd
+                  </span>
+                ) : null}
+              </p>
+              {/*
+                A textarea rather than the dimmed read-only rendering. The placeholders
+                have to stay literally editable — moving a variable substitution to a
+                different point in a sentence is most of what translating is — and a
+                rich rendering would either hide them or make them unselectable.
+              */}
+              <textarea
+                value={draft ?? message.text}
+                onChange={(event) =>
+                  setDrafts({ ...drafts, [message.index]: event.target.value })
+                }
+                rows={Math.min(6, Math.max(1, Math.ceil((draft ?? message.text).length / 60)))}
+                spellCheck={false}
+                className="mt-0.5 w-full resize-y rounded bg-transparent px-1 py-0.5 text-xs outline-none focus:bg-input/40"
+              />
+            </li>
+          )
+        })}
         {shown.length === 0 ? (
           <li className="p-4 text-center text-xs text-muted-foreground/60">
             Nothing matches that.
@@ -395,19 +488,13 @@ function MessageList({
   )
 }
 
-/** Dims the `{n:...}` placeholders so the words read as words. */
-function renderText(text: string): ReactNode {
-  const parts = text.split(/(\{n:[^}]*\})/g)
-  return parts.map((part, index) =>
-    part.startsWith('{n:') ? (
-      <span key={index} className="text-muted-foreground/50">
-        {part}
-      </span>
-    ) : (
-      part
-    )
-  )
-}
+/*
+ * The dimmed read-only rendering of `{n:...}` placeholders used to live here and
+ * has been removed with the read-only list. Placeholders have to stay literally
+ * editable — moving a variable substitution to a different point in a sentence is
+ * most of what translating is — and any rich rendering either hides them or makes
+ * them unselectable.
+ */
 
 /**
  * A model container's structure. No geometry — decoding vertex buffers is a different project, and

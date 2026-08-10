@@ -38,6 +38,14 @@ export const toORPCError = (error: AppError): ORPCError<string, unknown> =>
         })
     ),
     Match.tag(
+      'ReadOnlyError',
+      (e) =>
+        new ORPCError('READ_ONLY', {
+          message: e.detail,
+          data: { path: e.path, detail: e.detail }
+        })
+    ),
+    Match.tag(
       'DbError',
       (e) => new ORPCError('DB_ERROR', { message: e.detail, data: { detail: e.detail } })
     ),

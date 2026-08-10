@@ -24,6 +24,14 @@ extraResources:
   - from: drizzle
     to: drizzle
     filter: ['**/*']
+  # The Help menu opens these from disk rather than from a URL: this is a tool for
+  # working on files that cannot be shared, and help that needs the internet fails
+  # exactly when it is most wanted.
+  - from: docs
+    to: docs
+    filter: ['**/*.md']
+  - from: README.md
+    to: docs/README.md
 
 asarUnpack:
   - '**/node_modules/better-sqlite3/**'

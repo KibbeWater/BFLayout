@@ -10,7 +10,14 @@ import type { LayoutSource } from '@shared/contract'
  * should not disturb the other.
  */
 /** Which panel the left sidebar is showing. */
-export type SidebarTab = 'files' | 'archive' | 'textures' | 'materials'
+export type SidebarTab =
+  | 'files'
+  | 'archive'
+  | 'search'
+  | 'textures'
+  | 'materials'
+  | 'mod'
+  | 'agent'
 
 interface FolderStore {
   /**

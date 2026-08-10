@@ -72,6 +72,19 @@ export function describeError(error: unknown): DescribedError {
           detail: `No ${String(data?.['kind'] ?? 'item')} named ${String(data?.['id'] ?? '')}.`,
           retryable: false
         }
+      /**
+       * Not retryable, and deliberately not phrased as a failure: nothing is
+       * broken. The dump is read-only because a mod project is open, and the
+       * detail from main already names the mod folder the edit belongs in.
+       */
+      case 'READ_ONLY': {
+        const path = String(data?.['path'] ?? '')
+        return {
+          title: path ? `${basename(path)} is part of the pristine dump` : 'That location is read-only',
+          detail: String(data?.['detail'] ?? error.message),
+          retryable: false
+        }
+      }
       case 'DB_ERROR':
         return {
           title: 'Local database error',

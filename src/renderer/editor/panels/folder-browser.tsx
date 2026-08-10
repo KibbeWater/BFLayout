@@ -19,10 +19,16 @@ import {
   Package,
   PackageOpen,
   Box,
-  Type
+  Type,
+  Undo2
 } from 'lucide-react'
 
-import type { FolderEntry, FolderEntryKind, FolderViewMode } from '@shared/contract'
+import type {
+  FolderEntry,
+  FolderEntryKind,
+  FolderOrigin,
+  FolderViewMode
+} from '@shared/contract'
 import { getClient, getOrpc } from '@renderer/lib/orpc'
 import { describeError } from '@renderer/lib/errors'
 import { reportError, reportSuccess } from '@renderer/lib/toast'
@@ -235,11 +241,19 @@ function DirectoryNode({
   path,
   depth,
   name,
+  origin = 'pristine',
   defaultOpen = false
 }: {
   path: string
   depth: number
   name?: string
+  /**
+   * Whether the mod layer has anything below this directory. Nothing creates a
+   * directory in the layer except a write landing inside it, so `modified` here
+   * means "there are changes down this branch" — which is what lets the badge
+   * lead you to a changed file instead of only appearing once you have found it.
+   */
+  origin?: FolderOrigin
   defaultOpen?: boolean
 }): ReactNode {
   const orpc = getOrpc()
@@ -290,6 +304,7 @@ function DirectoryNode({
           )}
           {KIND_ICON.directory}
           <span className="min-w-0 flex-1 truncate">{name}</span>
+          <OriginBadge origin={origin} />
           {query.isFetching ? <Loader2 className="size-3 shrink-0 animate-spin" /> : null}
         </button>
       )}
@@ -313,6 +328,7 @@ function DirectoryNode({
                     key={entry.path}
                     path={entry.path}
                     name={entry.name}
+                    origin={entry.origin}
                     depth={depth + 1}
                   />
                 ) : (
@@ -430,6 +446,7 @@ function FlatList({ path }: { path: string }): ReactNode {
           >
             {KIND_ICON.directory}
             <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+            <OriginBadge origin={entry.origin} />
             <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" />
           </button>
         ) : (
@@ -483,12 +500,78 @@ function ListError({
   )
 }
 
+/**
+ * Marks a row that the mod layer covers.
+ *
+ * Deliberately small and always in the same place: with a project open, this is
+ * the difference between the game's file and yours, and it has to be readable
+ * while scanning a directory rather than something you go looking for.
+ */
+function OriginBadge({ origin }: { origin: FolderOrigin }): ReactNode {
+  if (origin === 'pristine') return null
+  const modified = origin === 'modified'
+  return (
+    <span
+      className={`shrink-0 rounded px-1 text-[9px] uppercase ${
+        modified ? 'bg-primary/20 text-primary' : 'bg-emerald-500/20 text-emerald-500'
+      }`}
+      title={
+        modified
+          ? 'Your mod replaces this file — opening it opens your copy, not the dump’s'
+          : 'Your mod adds this file; the dump has nothing here'
+      }
+    >
+      {modified ? 'mod' : 'new'}
+    </span>
+  )
+}
+
 function FileRow({ entry, depth }: { entry: FolderEntry; depth: number }): ReactNode {
+  const orpc = getOrpc()
+  const queryClient = useQueryClient()
   const { openPath } = useOpenFile()
   const showArchive = useFolder((state) => state.showArchiveTab)
   const openByml = useFolder((state) => state.openByml)
   const openPreview = useFolder((state) => state.openPreview)
   const [busy, setBusy] = useState(false)
+  const [reverting, setReverting] = useState(false)
+
+  /**
+   * Reverting deletes the mod's copy so the dump's applies again, and it is
+   * confirmed because for an *added* file there is nothing underneath — the
+   * revert removes the content outright rather than restoring anything.
+   */
+  const revert = (): void => {
+    if (!entry.relativePath) return
+    const adding = entry.origin === 'added'
+    const confirmed = window.confirm(
+      adding
+        ? `Remove ${entry.name} from your mod?\n\nThe dump has no file here, so nothing takes its place — this deletes it.`
+        : `Revert ${entry.name} to the dump's version?\n\nYour mod's copy is deleted and the game's original applies again.`
+    )
+    if (!confirmed) return
+
+    setReverting(true)
+    void (async () => {
+      try {
+        const result = await getClient().project.revert({ relativePath: entry.relativePath! })
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: orpc.folder.list.key() }),
+          queryClient.invalidateQueries({ queryKey: orpc.project.status.key() })
+        ])
+        reportSuccess(
+          result.hadPristine ? 'Reverted' : 'Removed from the mod',
+          result.hadPristine
+            ? `${entry.name} is back to the dump's version.`
+            : `${entry.name} is no longer part of your mod.`
+        )
+      } catch (cause) {
+        reportError(cause, { retry: revert })
+      } finally {
+        setReverting(false)
+      }
+    })()
+  }
 
   const openable = OPENABLE.has(entry.kind)
 
@@ -545,36 +628,63 @@ function FileRow({ entry, depth }: { entry: FolderEntry; depth: number }): React
   }
 
   return (
-    <button
-      type="button"
-      // Opening replaces the current tab; a modifier or middle click adds one, the
-      // same gesture browsers use.
-      onClick={(event) => activate(event.metaKey || event.ctrlKey || event.shiftKey)}
-      onAuxClick={(event) => event.button === 1 && activate(true)}
-      disabled={busy}
-      className={`flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-accent/60 disabled:opacity-60 ${
-        openable ? '' : 'text-muted-foreground/60'
-      }`}
-      style={{ paddingLeft: depth * 12 + 4 + 16 }}
-      title={
-        openable
-          ? `${entry.path}\nCmd/Ctrl/Shift-click to open in a new tab`
-          : `${entry.path}\n(not a format this editor opens)`
-      }
-    >
-      {busy ? <Loader2 className="size-3.5 shrink-0 animate-spin" /> : KIND_ICON[entry.kind]}
-      <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-      {entry.compressed ? (
-        <span
-          className="shrink-0 rounded bg-muted/60 px-1 text-[9px] uppercase text-muted-foreground"
-          title="Compressed; decompressed on open"
-        >
-          zs
+    <div className="group flex w-full items-center">
+      <button
+        type="button"
+        // Opening replaces the current tab; a modifier or middle click adds one, the
+        // same gesture browsers use.
+        onClick={(event) => activate(event.metaKey || event.ctrlKey || event.shiftKey)}
+        onAuxClick={(event) => event.button === 1 && activate(true)}
+        disabled={busy}
+        className={`flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-accent/60 disabled:opacity-60 ${
+          openable ? '' : 'text-muted-foreground/60'
+        }`}
+        style={{ paddingLeft: depth * 12 + 4 + 16 }}
+        title={
+          openable
+            ? `${entry.path}\nCmd/Ctrl/Shift-click to open in a new tab`
+            : `${entry.path}\n(not a format this editor opens)`
+        }
+      >
+        {busy ? <Loader2 className="size-3.5 shrink-0 animate-spin" /> : KIND_ICON[entry.kind]}
+        <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+        <OriginBadge origin={entry.origin} />
+        {entry.compressed ? (
+          <span
+            className="shrink-0 rounded bg-muted/60 px-1 text-[9px] uppercase text-muted-foreground"
+            title="Compressed; decompressed on open"
+          >
+            zs
+          </span>
+        ) : null}
+        <span className="shrink-0 font-mono text-[10px] text-muted-foreground/60">
+          {formatSize(entry.size)}
         </span>
+      </button>
+      {entry.relativePath ? (
+        <button
+          type="button"
+          onClick={revert}
+          disabled={reverting}
+          className="mr-1 shrink-0 rounded p-1 opacity-0 hover:bg-accent focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-50"
+          title={
+            entry.origin === 'added'
+              ? 'Remove this file from your mod'
+              : "Revert to the dump's version"
+          }
+          aria-label={
+            entry.origin === 'added'
+              ? `Remove ${entry.name} from the mod`
+              : `Revert ${entry.name} to the dump's version`
+          }
+        >
+          {reverting ? (
+            <Loader2 className="size-3 animate-spin" />
+          ) : (
+            <Undo2 className="size-3 text-muted-foreground/70" />
+          )}
+        </button>
       ) : null}
-      <span className="shrink-0 font-mono text-[10px] text-muted-foreground/60">
-        {formatSize(entry.size)}
-      </span>
-    </button>
+    </div>
   )
 }
